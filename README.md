@@ -1,8 +1,12 @@
-# Equipped Item Tooltips
+# Extended Item Tooltips
 
-Equipped Item Tooltips is a UE4SS Lua mod for Gothic 1 Remake. It shows tooltips for equipped inventory items and automatically compares compatible backpack equipment with currently equipped gear.
+Extended Item Tooltips is a UE4SS Lua mod for Gothic 1 Remake. It shows
+tooltips for equipped inventory items and extends the game's native comparison
+flow to compatible backpack weapons.
 
-Armor, jewelry, weapons, and other equipped slots no longer feel like dead UI when the mouse is over them. Hovering compatible equipment in the backpack also activates the game's native comparison view.
+Armor, jewelry, weapons, and other equipped slots no longer feel like dead UI
+when the mouse is over them. Melee and ranged weapons in the backpack can be
+compared with the first weapon of the same type assigned to the hotbar.
 
 ## Requirements
 
@@ -15,16 +19,16 @@ Armor, jewelry, weapons, and other equipped slots no longer feel like dead UI wh
 1. Create this folder in the game's UE4SS mods directory:
 
    ```text
-   <GameDir>/G1R/Binaries/Win64/ue4ss/Mods/EquippedItemTooltips/
+   <GameDir>/G1R/Binaries/Win64/ue4ss/Mods/ExtendedItemTooltips/
    ```
 
-2. Copy the contents of `package/EquippedItemTooltips` into that folder.
+2. Copy the contents of `package/ExtendedItemTooltips` into that folder.
 3. Install `PleasureLib` as a neighboring UE4SS mod if it is not already present.
 4. Start the game with UE4SS enabled.
 
 ## Configuration
 
-Defaults live in `EquippedItemTooltips.ini`:
+Defaults live in `ExtendedItemTooltips.ini`:
 
 ```ini
 Enabled=true
@@ -50,6 +54,15 @@ still toggle comparisons temporarily. The menu selection is saved back to the IN
 The mod writes the wearable tooltip widget's `Visibility` property directly. This is the path confirmed by UE4SS logs; the inherited `SetVisibility` function is not used.
 
 Advanced users can override the inventory slot hover/unhover hook candidates with semicolon-separated INI values.
+
+## Updating from Equipped Item Tooltips
+
+Version 0.19.0 renamed the mod and its technical identifiers. With the game
+closed, rename the existing `EquippedItemTooltips` mod folder to
+`ExtendedItemTooltips` and rename `EquippedItemTooltips.ini` inside it to
+`ExtendedItemTooltips.ini`. Then replace the remaining files with the new
+version. Do not keep both mod folders installed, because both versions would
+register the same inventory hooks.
 
 ## Development Notes
 

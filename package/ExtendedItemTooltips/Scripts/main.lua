@@ -1,16 +1,16 @@
-local MOD = "EquippedItemTooltips"
+local MOD = "ExtendedItemTooltips"
 local pleasureLib = require("pleasure_lib_loader").new(MOD)
 if type(pleasureLib) ~= "table" then return end
 
-local CONFIG_FILE_NAME = "EquippedItemTooltips.ini"
-local VERSION = "0.18.0"
+local CONFIG_FILE_NAME = "ExtendedItemTooltips.ini"
+local VERSION = "0.19.0"
 
-_G.__EQUIPPED_ITEM_TOOLTIPS_GENERATION =
-    (_G.__EQUIPPED_ITEM_TOOLTIPS_GENERATION or 0) + 1
-local SCRIPT_GENERATION = _G.__EQUIPPED_ITEM_TOOLTIPS_GENERATION
+_G.__EXTENDED_ITEM_TOOLTIPS_GENERATION =
+    (_G.__EXTENDED_ITEM_TOOLTIPS_GENERATION or 0) + 1
+local SCRIPT_GENERATION = _G.__EXTENDED_ITEM_TOOLTIPS_GENERATION
 
 local function generation_is_current()
-    return _G.__EQUIPPED_ITEM_TOOLTIPS_GENERATION == SCRIPT_GENERATION
+    return _G.__EXTENDED_ITEM_TOOLTIPS_GENERATION == SCRIPT_GENERATION
 end
 
 local DEFAULT_CONFIG = {
@@ -116,8 +116,8 @@ local function config_candidate_paths()
         table.insert(paths, dir .. "..\\" .. CONFIG_FILE_NAME)
         table.insert(paths, dir .. CONFIG_FILE_NAME)
     end
-    table.insert(paths, "Mods\\EquippedItemTooltips\\" .. CONFIG_FILE_NAME)
-    table.insert(paths, "ue4ss\\Mods\\EquippedItemTooltips\\" .. CONFIG_FILE_NAME)
+    table.insert(paths, "Mods\\ExtendedItemTooltips\\" .. CONFIG_FILE_NAME)
+    table.insert(paths, "ue4ss\\Mods\\ExtendedItemTooltips\\" .. CONFIG_FILE_NAME)
     table.insert(paths, CONFIG_FILE_NAME)
     return paths
 end
@@ -1825,7 +1825,7 @@ elseif type(RegisterHook) ~= "function" then
     pleasureLib:log("Loaded v" .. VERSION .. " in degraded mode: RegisterHook unavailable.")
 else
     pleasureLib:register_game_bool_setting({
-        id = "EquippedItemTooltips.ComparisonDefaultEnabled",
+        id = "ExtendedItemTooltips.ComparisonDefaultEnabled",
         default = DEFAULT_CONFIG.ComparisonDefaultEnabled,
         get = function()
             return config.ComparisonDefaultEnabled == true

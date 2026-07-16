@@ -1,6 +1,7 @@
-Equipped Item Tooltips
+Extended Item Tooltips
 
 UE4SS Lua mod for Gothic 1 Remake.
+Version: 0.19.0
 
 Requires PleasureLib.
 
@@ -14,7 +15,7 @@ whether comparisons start enabled whenever the inventory is opened. The same
 value is available as ComparisonDefaultEnabled in the INI.
 
 Config:
-- EquippedItemTooltips.ini
+- ExtendedItemTooltips.ini
 
 Troubleshooting:
 - Set Debug=true, reload the game, hover equipped items, and check the UE4SS log.

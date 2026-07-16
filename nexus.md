@@ -1,4 +1,4 @@
-# Equipped Item Tooltips
+# Extended Item Tooltips
 
 **Checkout my other mods**
 
@@ -61,27 +61,27 @@ Leave these empty unless a game update changes the widget function names.
 
 ## Installation
 
-Install PleasureLib and Equipped Item Tooltips as neighboring folders in your
+Install PleasureLib and Extended Item Tooltips as neighboring folders in your
 UE4SS Mods directory:
 
 ```text
-G1R/Binaries/Win64/ue4ss/Mods/EquippedItemTooltips/
+G1R/Binaries/Win64/ue4ss/Mods/ExtendedItemTooltips/
 G1R/Binaries/Win64/ue4ss/Mods/PleasureLib/
 ```
 
 The installed folder should include:
 
 ```text
-EquippedItemTooltips/enabled.txt
-EquippedItemTooltips/EquippedItemTooltips.ini
-EquippedItemTooltips/readme.txt
-EquippedItemTooltips/Scripts/main.lua
-EquippedItemTooltips/Scripts/pleasure_lib_loader.lua
+ExtendedItemTooltips/enabled.txt
+ExtendedItemTooltips/ExtendedItemTooltips.ini
+ExtendedItemTooltips/readme.txt
+ExtendedItemTooltips/Scripts/main.lua
+ExtendedItemTooltips/Scripts/pleasure_lib_loader.lua
 ```
 
 ## Optional INI Configuration
 
-You can edit EquippedItemTooltips.ini in the mod folder:
+You can edit ExtendedItemTooltips.ini in the mod folder:
 
 ```ini
 Enabled=true
@@ -114,9 +114,19 @@ No new items, stats, quests, save data, or balance changes are introduced.
 
 ## Updating
 
-When updating from an older version, replace or merge the whole EquippedItemTooltips folder.
+### Updating from Equipped Item Tooltips 0.18.0 or Older
 
-If you customized EquippedItemTooltips.ini, you can keep your existing values.
+Version 0.19.0 renamed the mod and its technical identifiers. With the game
+closed:
+
+1. Rename the existing `EquippedItemTooltips` folder to `ExtendedItemTooltips`
+2. Rename `EquippedItemTooltips.ini` inside it to `ExtendedItemTooltips.ini`
+3. Replace the remaining files with the new version
+
+Do not keep both mod folders installed. Both versions would register the same
+inventory hooks.
+
+If you customized the old INI, renaming it preserves your existing values.
 
 ## Changelog
 
@@ -143,9 +153,16 @@ If you customized EquippedItemTooltips.ini, you can keep your existing values.
 - Added PleasureLib integration for reusable native mod settings
 - Keeps only one functional entry across complete settings-menu recreation
 
+### Renamed to Extended Item Tooltips
+
+- Renamed the visible and technical mod name to Extended Item Tooltips
+- Renamed the UE4SS mod folder and INI to `ExtendedItemTooltips`
+- Renamed the runtime, native setting ID, hot-reload namespace, and package assets
+- Updated the version to 0.19.0
+
 ## Current Version
 
-`0.18.0`
+`0.19.0`
 
 ## Why?
 
@@ -154,4 +171,4 @@ Because if backpack items can tell you what they are, equipped items should be p
 ## Source Code and Issues
 
 The source code and issue tracker are available on
-[GitHub](https://github.com/89pleasure/G1R-EquippedItemTooltips).
+[GitHub](https://github.com/89pleasure/G1R-ExtendedItemTooltips).

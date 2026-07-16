@@ -2,7 +2,16 @@ Equipped Item Tooltips
 
 UE4SS Lua mod for Gothic 1 Remake.
 
+Requires PleasureLib.
+
 Shows item tooltips when hovering equipped inventory items, using the game's existing wearable tooltip UI and compare flag where available.
+
+EnableComparisonTooltips=true enables comparison support for compatible armor,
+jewelry, and weapons. Left Ctrl toggles comparisons while the inventory is open.
+
+Settings -> Game -> Mods contains a localized ON/OFF option that determines
+whether comparisons start enabled whenever the inventory is opened. The same
+value is available as ComparisonDefaultEnabled in the INI.
 
 Config:
 - EquippedItemTooltips.ini

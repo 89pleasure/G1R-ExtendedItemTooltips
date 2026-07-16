@@ -61,4 +61,4 @@ Pull requests should include a concise summary, changed files, in-game test note
 
 ## Configuration Notes
 
-`EquippedItemTooltips.ini` supports `Enabled`, `Debug`, `TooltipCooldownMs`, `ForceTooltipVisibility`, and optional semicolon-separated override lists for inventory slot hover/unhover hook candidates.
+`EquippedItemTooltips.ini` supports `Enabled`, `Debug`, `TooltipCooldownMs`, `ForceTooltipVisibility`, `EnableComparisonTooltips`, and optional semicolon-separated override lists for inventory slot hover/unhover hook candidates.

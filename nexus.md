@@ -1,5 +1,9 @@
 # Equipped Item Tooltips
 
+**Checkout my other mods**
+
+[G1R - Optimizer](https://www.nexusmods.com/gothic1remake/mods/68) | [G1R - Cancel Interactions](https://www.nexusmods.com/gothic1remake/mods/181) | [Let Snaf Cook](https://www.nexusmods.com/gothic1remake/mods/448) | [QuickBites](https://www.nexusmods.com/gothic1remake/mods/452)
+
 Equipped gear should not feel like dead UI.
 
 In the inventory, backpack items already show useful tooltips when you hover them. Equipped items, however, can sit right there on the character sheet without showing the same information. Armor, rings, amulets, weapons, and similar equipped slots deserve the same treatment.

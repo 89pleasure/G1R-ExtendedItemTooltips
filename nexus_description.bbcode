@@ -44,6 +44,17 @@ EnableComparisonTooltips enables the comparison feature. Left Ctrl toggles the n
 
 ComparisonDefaultEnabled determines whether comparisons start enabled whenever the inventory is opened. The same option is available in-game under Settings -> Game -> Mods and changes made there are saved to this INI.
 
+[size=4][b]How Weapon Comparison Chooses a Weapon[/b][/size]
+
+Weapons assigned to the hotbar act as the equipped comparison weapons. When several weapons of the same type are assigned, the mod checks the hotbar from slot 1 upward and uses the first matching weapon:
+
+[list]
+[*]Melee weapons are compared with the first melee weapon in the hotbar
+[*]Ranged weapons are compared with the first ranged weapon in the hotbar
+[*]If the hotbar contains no weapon of the matching type, no comparison tooltip is shown
+[*]A weapon that is itself assigned to the hotbar does not start a comparison with itself
+[/list]
+
 Advanced users can override the inventory slot hover/unhover hook paths in the INI file:
 
 [code]
@@ -109,7 +120,8 @@ If you customized EquippedItemTooltips.ini, you can keep your existing values.
 [list]
 [*]Added comparison support for compatible backpack melee and ranged weapons
 [*]Uses the game's native comparison filtering and layout
-[*]Compares melee with the first melee weapon and ranged with the first ranged weapon in the hotbar
+[*]Checks the hotbar from slot 1 upward and uses the first weapon of the matching type
+[*]Shows no weapon comparison when the hotbar has no matching weapon
 [*]Leaves armor, ring, and amulet comparison handling to the base game
 [/list]
 

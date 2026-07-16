@@ -21,30 +21,11 @@ This UE4SS Lua mod shows item tooltips when hovering equipped inventory items an
 [*]Does not modify savegame data
 [/list]
 
-[size=4][b]Manual Configuration[/b][/size]
+[size=4][b]How Comparison Works[/b][/size]
 
-You can edit EquippedItemTooltips.ini in the mod folder:
+Left Ctrl toggles the native comparison view while the inventory is open. You can choose whether comparisons start enabled under Settings -> Game -> Mods. That preference is saved and restored automatically.
 
-[code]
-Enabled=true
-Debug=false
-TooltipCooldownMs=40
-ForceTooltipVisibility=true
-EnableComparisonTooltips=true
-ComparisonDefaultEnabled=false
-[/code]
-
-Leave Debug=false for normal play. Enable Debug=true only when collecting UE4SS log output for hover or tooltip issues.
-
-TooltipCooldownMs controls how quickly repeated hover events on the same slot are handled. The default value should feel instant while avoiding noisy duplicate events.
-
-ForceTooltipVisibility keeps the game's wearable tooltip widget visible while an equipped item slot is actively hovered. Disable this only if a future game update starts showing equipped item tooltips natively or if you are troubleshooting UI conflicts.
-
-EnableComparisonTooltips enables the comparison feature. Left Ctrl toggles the native comparison view while the inventory is open.
-
-ComparisonDefaultEnabled determines whether comparisons start enabled whenever the inventory is opened. The same option is available in-game under Settings -> Game -> Mods and changes made there are saved to this INI.
-
-[size=4][b]How Weapon Comparison Chooses a Weapon[/b][/size]
+Armor, rings, and amulets continue to use the game's existing comparison logic. The mod extends that same comparison flow to melee and ranged weapons.
 
 Weapons assigned to the hotbar act as the equipped comparison weapons. When several weapons of the same type are assigned, the mod checks the hotbar from slot 1 upward and uses the first matching weapon:
 
@@ -90,6 +71,29 @@ EquippedItemTooltips/readme.txt
 EquippedItemTooltips/Scripts/main.lua
 EquippedItemTooltips/Scripts/pleasure_lib_loader.lua
 [/code]
+
+[size=4][b]Optional INI Configuration[/b][/size]
+
+You can edit EquippedItemTooltips.ini in the mod folder:
+
+[code]
+Enabled=true
+Debug=false
+TooltipCooldownMs=40
+ForceTooltipVisibility=true
+EnableComparisonTooltips=true
+ComparisonDefaultEnabled=false
+[/code]
+
+Leave Debug=false for normal play. Enable Debug=true only when collecting UE4SS log output for hover or tooltip issues.
+
+TooltipCooldownMs controls how quickly repeated hover events on the same slot are handled. The default value should feel instant while avoiding noisy duplicate events.
+
+ForceTooltipVisibility keeps the game's wearable tooltip widget visible while an equipped item slot is actively hovered. Disable this only if a future game update starts showing equipped item tooltips natively or if you are troubleshooting UI conflicts.
+
+EnableComparisonTooltips enables or disables comparison support completely.
+
+ComparisonDefaultEnabled controls whether comparisons start enabled whenever the inventory is opened. It stores the same value as the in-game option under Settings -> Game -> Mods.
 
 [size=4][b]Compatibility[/b][/size]
 

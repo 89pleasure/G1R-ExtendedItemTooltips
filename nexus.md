@@ -150,3 +150,8 @@ If you customized EquippedItemTooltips.ini, you can keep your existing values.
 ## Why?
 
 Because if backpack items can tell you what they are, equipped items should be polite enough to do the same.
+
+## Source Code and Issues
+
+The source code and issue tracker are available on
+[GitHub](https://github.com/89pleasure/G1R-EquippedItemTooltips).

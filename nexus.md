@@ -4,19 +4,21 @@ Equipped gear should not feel like dead UI.
 
 In the inventory, backpack items already show useful tooltips when you hover them. Equipped items, however, can sit right there on the character sheet without showing the same information. Armor, rings, amulets, weapons, and similar equipped slots deserve the same treatment.
 
-This UE4SS Lua mod shows item tooltips when hovering equipped inventory items and automatically compares compatible backpack equipment with currently equipped gear.
+This UE4SS Lua mod shows item tooltips when hovering equipped inventory items
+and extends the game's native comparison flow to compatible backpack weapons.
 
 ## What It Does
 
 - Shows the game's existing item tooltip for equipped inventory slots
 - Works for wearable/equipment slots such as armor, jewelry, and weapons
-- Adds native comparison support for compatible backpack armor, jewelry, and weapons
+- Adds comparison support for compatible backpack melee and ranged weapons
+- Leaves the game's existing armor, ring, and amulet comparisons untouched
 - Adds a localized ON/OFF option under Settings -> Game -> Mods for enabling comparisons by default
 - Uses the game's existing tooltip UI
 - Does not add new items
 - Does not change item stats, balance, equipment, or inventory contents
 - Existing savegames are supported
-- The mod only changes equipped-slot hover tooltip behavior
+- Does not modify savegame data
 
 ## Manual Configuration
 
@@ -59,13 +61,16 @@ Leave these empty unless a game update changes the widget function names.
 
 - Gothic 1 Remake
 - UE4SS
+- PleasureLib 0.3.31 or newer
 
 ## Installation
 
-Install the mod folder into your UE4SS Mods directory:
+Install PleasureLib and Equipped Item Tooltips as neighboring folders in your
+UE4SS Mods directory:
 
 ```text
 G1R/Binaries/Win64/ue4ss/Mods/EquippedItemTooltips/
+G1R/Binaries/Win64/ue4ss/Mods/PleasureLib/
 ```
 
 The installed folder should include:
@@ -75,6 +80,7 @@ EquippedItemTooltips/enabled.txt
 EquippedItemTooltips/EquippedItemTooltips.ini
 EquippedItemTooltips/readme.txt
 EquippedItemTooltips/Scripts/main.lua
+EquippedItemTooltips/Scripts/pleasure_lib_loader.lua
 ```
 
 ## Compatibility
@@ -99,11 +105,23 @@ If you customized EquippedItemTooltips.ini, you can keep your existing values.
 - Restores the wearable-compare flag when the cursor leaves the equipped slot
 - Reduced the implementation to the confirmed working hover/unhover hooks
 
-### Native Comparison
+### Native Weapon Comparison
 
-- Added automatic comparison for compatible backpack equipment
+- Added comparison support for compatible backpack melee and ranged weapons
 - Uses the game's native comparison filtering and layout
-- Supports armor, jewelry, melee weapons, and ranged weapons where the game marks them as compatible
+- Compares melee with the first melee weapon and ranged with the first ranged weapon in the hotbar
+- Leaves armor, ring, and amulet comparison handling to the base game
+
+### Native Settings Integration
+
+- Added a localized ON/OFF option under Settings -> Game -> Mods
+- Added persistent ComparisonDefaultEnabled state
+- Added PleasureLib integration for reusable native mod settings
+- Keeps only one functional entry across complete settings-menu recreation
+
+## Current Version
+
+`0.18.0`
 
 ## Why?
 

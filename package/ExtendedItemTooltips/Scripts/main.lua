@@ -2,16 +2,6 @@ local MOD = "ExtendedItemTooltips"
 local pleasureLib = require("pleasure_lib_loader").new(MOD)
 if type(pleasureLib) ~= "table" then return end
 
-local CONFIG_FILE_NAME = "ExtendedItemTooltips.ini"
-local VERSION = "0.19.7"
-
-local WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS = 150
-local WEAPON_COMPARISON_HOVER_SETTLE_MAX_MS = 500
-local EQUIPPED_HOVER_DUPLICATE_COOLDOWN_MS = 40
-local EQUIPPED_TOOLTIP_FORCE_DELAYS_MS = {
-    20, 80, 160, 320,
-}
-
 _G.__EXTENDED_ITEM_TOOLTIPS_GENERATION =
     (_G.__EXTENDED_ITEM_TOOLTIPS_GENERATION or 0) + 1
 local SCRIPT_GENERATION = _G.__EXTENDED_ITEM_TOOLTIPS_GENERATION
@@ -20,27 +10,69 @@ local function generation_is_current()
     return _G.__EXTENDED_ITEM_TOOLTIPS_GENERATION == SCRIPT_GENERATION
 end
 
-local DEFAULT_CONFIG = {
-    Enabled = true,
-    Debug = false,
-    TooltipCooldownMs = WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS,
-    ForceTooltipVisibility = true,
-    EnableComparisonTooltips = true,
-    ComparisonDefaultEnabled = false,
+local function script_directory()
+    local ok, info = pcall(function()
+        if type(debug) ~= "table"
+            or type(debug.getinfo) ~= "function"
+        then
+            return nil
+        end
+        return debug.getinfo(1, "S")
+    end)
+    if not ok or not info or not info.source then return nil end
+
+    local source = tostring(info.source)
+    if source:sub(1, 1) == "@" then
+        source = source:sub(2)
+    end
+    return source:match("^(.*[\\/])[^\\/]*$")
+end
+
+local function load_local_module(file_name, module_name)
+    local directory = script_directory()
+    if type(directory) == "string" and directory ~= ""
+        and type(dofile) == "function"
+    then
+        local ok, loaded = pcall(dofile, directory .. file_name)
+        if ok and type(loaded) == "table" then return loaded end
+        pleasureLib:log("Could not load " .. tostring(file_name)
+            .. ": " .. tostring(loaded))
+        return nil
+    end
+
+    local ok, loaded = pcall(require, module_name)
+    if ok and type(loaded) == "table" then return loaded end
+    pleasureLib:log("Could not load " .. tostring(module_name)
+        .. ": " .. tostring(loaded))
+    return nil
+end
+
+local Config = load_local_module(
+    "extended_item_tooltips_config.lua",
+    "extended_item_tooltips_config")
+if type(Config) ~= "table" then return end
+if type(Config.new) ~= "function" then
+    pleasureLib:log("Config module factory unavailable")
+    return
+end
+local config_ok, configController = pcall(Config.new, pleasureLib)
+if not config_ok or type(configController) ~= "table" then
+    pleasureLib:log("Could not initialize config module: "
+        .. tostring(configController))
+    return
+end
+
+local VERSION = "0.19.7"
+
+local EQUIPPED_HOVER_DUPLICATE_COOLDOWN_MS = 40
+local EQUIPPED_TOOLTIP_FORCE_DELAYS_MS = {
+    20, 80, 160, 320,
 }
 
 local UI_OBJECT_NOTIFY_CLASSES = {
     "/Game/UI/ManagementUI/Inventory/W_Inventory_Main.W_Inventory_Main_C",
     "/Game/UI/ManagementUI/Inventory/W_Inventory_Slot.W_Inventory_Slot_C",
     "/Game/UI/ManagementUI/Inventory/W_Inventory_ItemTooltip.W_Inventory_ItemTooltip_C",
-}
-
-local SLOT_HOVER_HOOKS = {
-    "/Game/UI/ManagementUI/Inventory/W_Inventory_Slot.W_Inventory_Slot_C:OnHovered",
-}
-
-local SLOT_UNHOVER_HOOKS = {
-    "/Game/UI/ManagementUI/Inventory/W_Inventory_Slot.W_Inventory_Slot_C:OnUnhovered",
 }
 
 local COMPARISON_TOGGLE_HOOKS = {
@@ -83,7 +115,9 @@ local INVENTORY_MAIN_PATH_NEEDLES = {
     "InventoryMain",
 }
 
-local config = {}
+local config = configController.values
+local weapon_comparison_hover_settle_ms =
+    configController.clamp_weapon_comparison_delay_ms
 local registered_hooks = {}
 local hook_retry_logged = {}
 local handled_ui_notification_classes = {}
@@ -144,210 +178,6 @@ local active_weapon_comparison = {
 local refresh_inventory_main_from_slot = nil
 local reset_inventory_runtime_state = nil
 local on_slot_hovered = nil
-
-local function merge_list(defaults, override)
-    local parsed = pleasureLib:split_list(override)
-    if #parsed > 0 then return parsed end
-    return pleasureLib:copy_array(defaults)
-end
-
-local function weapon_comparison_hover_settle_ms(value)
-    local delay_ms = math.floor(tonumber(value)
-        or DEFAULT_CONFIG.TooltipCooldownMs)
-    return math.max(WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS,
-        math.min(WEAPON_COMPARISON_HOVER_SETTLE_MAX_MS, delay_ms))
-end
-
-local function config_candidate_paths()
-    local paths = {}
-    local dir = pleasureLib:script_directory()
-    if dir then
-        table.insert(paths, dir .. "..\\" .. CONFIG_FILE_NAME)
-        table.insert(paths, dir .. CONFIG_FILE_NAME)
-    end
-    table.insert(paths, "Mods\\ExtendedItemTooltips\\" .. CONFIG_FILE_NAME)
-    table.insert(paths, "ue4ss\\Mods\\ExtendedItemTooltips\\" .. CONFIG_FILE_NAME)
-    table.insert(paths, CONFIG_FILE_NAME)
-    return paths
-end
-
-local function load_config()
-    config = {
-        Enabled = DEFAULT_CONFIG.Enabled,
-        Debug = DEFAULT_CONFIG.Debug,
-        TooltipCooldownMs = DEFAULT_CONFIG.TooltipCooldownMs,
-        ForceTooltipVisibility = DEFAULT_CONFIG.ForceTooltipVisibility,
-        EnableComparisonTooltips = DEFAULT_CONFIG.EnableComparisonTooltips,
-        ComparisonDefaultEnabled = DEFAULT_CONFIG.ComparisonDefaultEnabled,
-        SlotHoverHooks = SLOT_HOVER_HOOKS,
-        SlotUnhoverHooks = SLOT_UNHOVER_HOOKS,
-    }
-
-    for _, path in ipairs(config_candidate_paths()) do
-        local content = pleasureLib:read_text_file(path)
-        if content ~= nil then
-            local ini = pleasureLib:parse_ini(content)
-            config.Enabled = pleasureLib:parse_bool(ini.ENABLED, config.Enabled)
-            config.Debug = pleasureLib:parse_bool(ini.DEBUG, config.Debug)
-            config.ForceTooltipVisibility = pleasureLib:parse_bool(
-                ini.FORCETOOLTIPVISIBILITY, config.ForceTooltipVisibility)
-            config.EnableComparisonTooltips = pleasureLib:parse_bool(
-                ini.ENABLECOMPARISONTOOLTIPS, config.EnableComparisonTooltips)
-            config.ComparisonDefaultEnabled = pleasureLib:parse_bool(
-                ini.COMPARISONDEFAULTENABLED,
-                config.ComparisonDefaultEnabled)
-            local configured_cooldown =
-                tonumber(ini.TOOLTIPCOOLDOWNMS)
-                    or config.TooltipCooldownMs
-            config.TooltipCooldownMs =
-                weapon_comparison_hover_settle_ms(configured_cooldown)
-            config.SlotHoverHooks = merge_list(
-                SLOT_HOVER_HOOKS, ini.SLOTHOVERHOOKS)
-            config.SlotUnhoverHooks = merge_list(
-                SLOT_UNHOVER_HOOKS, ini.SLOTUNHOVERHOOKS)
-
-            config.ConfigPath = path
-            pleasureLib:set_debug(config.Debug)
-            if configured_cooldown ~= config.TooltipCooldownMs then
-                local normalized = pleasureLib:update_ini_value(
-                    path, "TooltipCooldownMs",
-                    tostring(config.TooltipCooldownMs))
-                pleasureLib:debug_log(
-                    "clamped weapon comparison delay"
-                    .. " configuredMs=" .. tostring(configured_cooldown)
-                    .. " effectiveMs="
-                    .. tostring(config.TooltipCooldownMs)
-                    .. " persisted=" .. tostring(normalized))
-            end
-            pleasureLib:log("Loaded config from " .. tostring(path)
-                .. ": Enabled=" .. tostring(config.Enabled)
-                .. " Debug=" .. tostring(config.Debug)
-                .. " ForceTooltipVisibility=" .. tostring(config.ForceTooltipVisibility)
-                .. " EnableComparisonTooltips="
-                .. tostring(config.EnableComparisonTooltips)
-                .. " ComparisonDefaultEnabled="
-                .. tostring(config.ComparisonDefaultEnabled)
-                .. " TooltipCooldownMs=" .. tostring(config.TooltipCooldownMs))
-            return
-        end
-    end
-
-    pleasureLib:set_debug(config.Debug)
-    pleasureLib:log("Config not found; using defaults.")
-end
-
-local COMPARISON_DEFAULT_SETTING_TRANSLATIONS = {
-            en = {
-                name = "Show comparisons by default",
-                description = "Automatically shows compatible item comparisons when the inventory is opened. Press Left Ctrl to toggle them temporarily.",
-            },
-            de = {
-                name = "Vergleiche standardmäßig anzeigen",
-                description = "Zeigt beim Öffnen des Inventars automatisch passende Gegenstandsvergleiche an. Mit der linken Strg-Taste können sie vorübergehend umgeschaltet werden.",
-            },
-            fr = {
-                name = "Afficher les comparaisons par défaut",
-                description = "Affiche automatiquement les comparaisons d'objets compatibles à l'ouverture de l'inventaire. Appuyez sur Ctrl gauche pour les activer ou les désactiver temporairement.",
-            },
-            it = {
-                name = "Mostra i confronti per impostazione predefinita",
-                description = "Mostra automaticamente i confronti tra oggetti compatibili quando apri l'inventario. Premi Ctrl sinistro per attivarli o disattivarli temporaneamente.",
-            },
-            es = {
-                name = "Mostrar comparaciones de forma predeterminada",
-                description = "Muestra automáticamente comparaciones de objetos compatibles al abrir el inventario. Pulsa Ctrl izquierdo para activarlas o desactivarlas temporalmente.",
-            },
-            pl = {
-                name = "Domyślnie pokazuj porównania",
-                description = "Automatycznie pokazuje porównania zgodnych przedmiotów po otwarciu ekwipunku. Naciśnij lewy Ctrl, aby tymczasowo je przełączyć.",
-            },
-            ru = {
-                name = "Показывать сравнения по умолчанию",
-                description = "Автоматически показывает сравнение подходящих предметов при открытии инвентаря. Нажмите левый Ctrl, чтобы временно включить или выключить сравнение.",
-            },
-            ["zh-hans"] = {
-                name = "默认显示对比",
-                description = "打开物品栏时自动显示兼容物品的对比。按左 Ctrl 可临时开启或关闭对比。",
-            },
-            ["zh-cn"] = {
-                name = "默认显示对比",
-                description = "打开物品栏时自动显示兼容物品的对比。按左 Ctrl 可临时开启或关闭对比。",
-            },
-            ja = {
-                name = "比較をデフォルトで表示",
-                description = "インベントリを開いたときに、対応するアイテムの比較を自動的に表示します。左Ctrlキーで一時的に切り替えられます。",
-            },
-            ["pt-br"] = {
-                name = "Mostrar comparações por padrão",
-                description = "Mostra automaticamente comparações de itens compatíveis ao abrir o inventário. Pressione Ctrl esquerdo para ativá-las ou desativá-las temporariamente.",
-            },
-}
-
-local WEAPON_COMPARISON_DELAY_SETTING_TRANSLATIONS = {
-    en = {
-        name = "Weapon comparison delay",
-        description = "Time in milliseconds a backpack weapon must remain hovered before its comparison is built. The Ctrl hint appears immediately.",
-    },
-    de = {
-        name = "Waffenvergleich-Verzoegerung",
-        description = "Zeit in Millisekunden, die eine Rucksackwaffe ausgewaehlt bleiben muss, bevor ihr Vergleich aufgebaut wird. Der Strg-Hinweis erscheint sofort.",
-    },
-}
-
-local function setting_persist_options(key)
-    return {
-        path = function() return config.ConfigPath end,
-        key = key,
-    }
-end
-
-local function register_game_settings()
-    pleasureLib:register_game_bool_setting({
-        id = "ExtendedItemTooltips.ComparisonDefaultEnabled",
-        section = "Extended Item Tooltips",
-        default = DEFAULT_CONFIG.ComparisonDefaultEnabled,
-        get = function()
-            return config.ComparisonDefaultEnabled == true
-        end,
-        set = function(value)
-            config.ComparisonDefaultEnabled = value == true
-            return true
-        end,
-        persist = setting_persist_options("ComparisonDefaultEnabled"),
-        translations = COMPARISON_DEFAULT_SETTING_TRANSLATIONS,
-    })
-
-    local required_api = {
-        "register_game_int_setting",
-    }
-    for _, api_name in ipairs(required_api) do
-        if type(pleasureLib[api_name]) ~= "function" then
-            pleasureLib:log("PleasureLib 0.5.0 settings API unavailable: "
-                .. api_name)
-            return false
-        end
-    end
-
-    pleasureLib:register_game_int_setting({
-        id = "ExtendedItemTooltips.TooltipCooldownMs",
-        section = "Extended Item Tooltips",
-        minimum = WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS,
-        maximum = WEAPON_COMPARISON_HOVER_SETTLE_MAX_MS,
-        default = DEFAULT_CONFIG.TooltipCooldownMs,
-        get = function()
-            return config.TooltipCooldownMs
-        end,
-        set = function(value)
-            config.TooltipCooldownMs =
-                weapon_comparison_hover_settle_ms(value)
-            return true
-        end,
-        persist = setting_persist_options("TooltipCooldownMs"),
-        translations = WEAPON_COMPARISON_DELAY_SETTING_TRANSLATIONS,
-    })
-
-    return true
-end
 
 local function is_valid(obj)
     -- PleasureLib already falls back to GetFullName when IsValid is
@@ -2486,14 +2316,14 @@ local function install_ui_object_notifications()
     return registered
 end
 
-load_config()
+configController.load()
 
 if config.Enabled ~= true then
     pleasureLib:log("Loaded v" .. VERSION .. " disabled by config.")
 elseif type(RegisterHook) ~= "function" then
     pleasureLib:log("Loaded v" .. VERSION .. " in degraded mode: RegisterHook unavailable.")
 else
-    register_game_settings()
+    configController.register_game_settings()
     local notification_count = install_ui_object_notifications()
     local count = register_hooks()
     if pending_hook_group_count() == 0 then

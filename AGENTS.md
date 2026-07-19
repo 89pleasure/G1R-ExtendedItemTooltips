@@ -4,7 +4,10 @@
 
 This repository contains a UE4SS Lua mod for Gothic 1 Remake.
 
-- `package/ExtendedItemTooltips/Scripts/main.lua` contains all runtime mod logic.
+- `package/ExtendedItemTooltips/Scripts/main.lua` contains runtime orchestration,
+  hooks, tooltip controllers, and UE4SS integration.
+- `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_config.lua`
+  owns defaults, INI loading, localization, and game-settings registration.
 - `package/ExtendedItemTooltips/ExtendedItemTooltips.ini` is the user-facing configuration file.
 - `package/ExtendedItemTooltips/enabled.txt` and `readme.txt` are packaged with the mod.
 - `README.md` is the public project documentation.

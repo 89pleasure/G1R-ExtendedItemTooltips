@@ -13,6 +13,8 @@ This repository contains a UE4SS Lua mod for Gothic 1 Remake.
   helpers.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_inventory.lua`
   owns stateless slot, inventory-item, and weapon classification queries.
+- `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_hooks.lua`
+  owns hook registration, late-UI notifications, and retry state.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_widgets.lua`
   owns tooltip widget discovery, reference linking, and visibility operations.
 - `package/ExtendedItemTooltips/ExtendedItemTooltips.ini` is the user-facing configuration file.

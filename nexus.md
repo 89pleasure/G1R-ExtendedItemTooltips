@@ -17,7 +17,7 @@ and extends the game's native comparison flow to compatible backpack weapons.
 - Works for wearable/equipment slots such as armor, jewelry, and weapons
 - Adds comparison support for compatible backpack melee and ranged weapons
 - Leaves the game's existing armor, ring, and amulet comparisons untouched
-- Adds a localized ON/OFF option under Settings -> Game -> Mods for enabling comparisons by default
+- Adds a localized ON/OFF option under Settings -> Mods -> Extended Item Tooltips for enabling comparisons by default
 - Uses the game's existing tooltip UI
 - Does not add new items
 - Does not change item stats, balance, equipment, or inventory contents
@@ -27,7 +27,7 @@ and extends the game's native comparison flow to compatible backpack weapons.
 ## How Comparison Works
 
 Left Ctrl toggles the native comparison view while the inventory is open. You
-can choose whether comparisons start enabled under Settings -> Game -> Mods.
+can choose whether comparisons start enabled under Settings -> Mods -> Extended Item Tooltips.
 That preference is saved and restored automatically.
 
 Armor, rings, and amulets continue to use the game's existing comparison logic.
@@ -57,7 +57,7 @@ Leave these empty unless a game update changes the widget function names.
 
 - Gothic 1 Remake
 - UE4SS
-- PleasureLib 0.3.31 or newer
+- PleasureLib 0.5.0 or newer
 
 ## Installation
 
@@ -86,7 +86,7 @@ You can edit ExtendedItemTooltips.ini in the mod folder:
 ```ini
 Enabled=true
 Debug=false
-TooltipCooldownMs=40
+TooltipCooldownMs=150
 ForceTooltipVisibility=true
 EnableComparisonTooltips=true
 ComparisonDefaultEnabled=false
@@ -96,7 +96,7 @@ Leave Debug=false for normal play.
 
 Enable Debug=true only when collecting UE4SS log output for hover or tooltip issues.
 
-TooltipCooldownMs controls how quickly repeated hover events on the same slot are handled. The default value should feel instant while avoiding noisy duplicate events.
+TooltipCooldownMs controls how long a backpack weapon must remain hovered before the native comparison tooltip is built (150-500 ms, default 150). The Left Ctrl hint appears immediately; only the native comparison update waits for a stable hover.
 
 ForceTooltipVisibility keeps the game's wearable tooltip widget visible while an equipped item slot is actively hovered. Disable this only if a future game update starts showing equipped item tooltips natively or if you are troubleshooting UI conflicts.
 
@@ -104,7 +104,7 @@ EnableComparisonTooltips enables or disables comparison support completely.
 
 ComparisonDefaultEnabled controls whether comparisons start enabled whenever
 the inventory is opened. It stores the same value as the in-game option under
-Settings -> Game -> Mods.
+Settings -> Mods -> Extended Item Tooltips.
 
 ## Compatibility
 
@@ -148,7 +148,7 @@ If you customized the old INI, renaming it preserves your existing values.
 
 ### Native Settings Integration
 
-- Added a localized ON/OFF option under Settings -> Game -> Mods
+- Added a localized ON/OFF option under Settings -> Mods -> Extended Item Tooltips
 - Added persistent ComparisonDefaultEnabled state
 - Added PleasureLib integration for reusable native mod settings
 - Keeps only one functional entry across complete settings-menu recreation
@@ -162,7 +162,7 @@ If you customized the old INI, renaming it preserves your existing values.
 
 ## Current Version
 
-`0.19.0`
+`0.19.7`
 
 ## Why?
 

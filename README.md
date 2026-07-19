@@ -12,7 +12,7 @@ compared with the first weapon of the same type assigned to the hotbar.
 
 - Gothic 1 Remake
 - UE4SS installed and enabled for the game
-- PleasureLib installed next to this mod in the UE4SS `Mods` directory
+- PleasureLib 0.5.0 or newer installed next to this mod in the UE4SS `Mods` directory
 
 ## Installation
 
@@ -33,7 +33,7 @@ Defaults live in `ExtendedItemTooltips.ini`:
 ```ini
 Enabled=true
 Debug=false
-TooltipCooldownMs=40
+TooltipCooldownMs=150
 ForceTooltipVisibility=true
 EnableComparisonTooltips=true
 ComparisonDefaultEnabled=false
@@ -41,13 +41,18 @@ ComparisonDefaultEnabled=false
 
 Leave `Debug=false` for normal play. Enable it only while collecting UE4SS log output for inventory hover issues.
 
+`TooltipCooldownMs` controls how long a backpack weapon must remain hovered before
+the native comparison tooltip is built (`150`-`500` ms, default `150`). The Left
+Ctrl hint appears immediately; only the native comparison update waits for a
+stable hover.
+
 `ForceTooltipVisibility=true` keeps the game's wearable tooltip widget visible while an equipped item slot is actively hovered. If that widget is not linked by the game UI, the mod links it to the `EquippedWearables` bar before broadcasting the hover event and temporarily enables the wearable-compare flag. Disable this if a future game update starts showing equipped item tooltips natively.
 
 `EnableComparisonTooltips=true` enables comparison support. By default, comparisons
 remain off until Left Ctrl is pressed, matching the game's native toggle behavior.
 
 `ComparisonDefaultEnabled` is also available as a native ON/OFF option under
-`Settings -> Game -> Mods`. When enabled, compatible armor, jewelry, melee, and
+`Settings -> Mods -> Extended Item Tooltips`. When enabled, compatible armor, jewelry, melee, and
 ranged comparisons start enabled whenever the inventory is opened. Left Ctrl can
 still toggle comparisons temporarily. The menu selection is saved back to the INI.
 

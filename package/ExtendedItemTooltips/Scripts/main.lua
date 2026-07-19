@@ -3,7 +3,11 @@ local pleasureLib = require("pleasure_lib_loader").new(MOD)
 if type(pleasureLib) ~= "table" then return end
 
 local CONFIG_FILE_NAME = "ExtendedItemTooltips.ini"
-local VERSION = "0.19.0"
+local VERSION = "0.19.7"
+
+local WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS = 150
+local WEAPON_COMPARISON_HOVER_SETTLE_MAX_MS = 500
+local EQUIPPED_HOVER_DUPLICATE_COOLDOWN_MS = 40
 
 _G.__EXTENDED_ITEM_TOOLTIPS_GENERATION =
     (_G.__EXTENDED_ITEM_TOOLTIPS_GENERATION or 0) + 1
@@ -16,7 +20,7 @@ end
 local DEFAULT_CONFIG = {
     Enabled = true,
     Debug = false,
-    TooltipCooldownMs = 40,
+    TooltipCooldownMs = WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS,
     ForceTooltipVisibility = true,
     EnableComparisonTooltips = true,
     ComparisonDefaultEnabled = false,
@@ -25,6 +29,7 @@ local DEFAULT_CONFIG = {
 local UI_OBJECT_NOTIFY_CLASSES = {
     "/Game/UI/ManagementUI/Inventory/W_Inventory_Main.W_Inventory_Main_C",
     "/Game/UI/ManagementUI/Inventory/W_Inventory_Slot.W_Inventory_Slot_C",
+    "/Game/UI/ManagementUI/Inventory/W_Inventory_ItemTooltip.W_Inventory_ItemTooltip_C",
 }
 
 local SLOT_HOVER_HOOKS = {
@@ -43,17 +48,29 @@ local INVENTORY_SHOWN_HOOKS = {
     "/Game/UI/ManagementUI/Inventory/W_Inventory_Main.W_Inventory_Main_C:OnShown",
 }
 
+local TOOLTIP_HINT_REFRESH_HOOKS = {
+    "/Script/G1R.InventoryItemTooltip:UpdateTooltip",
+    "/Game/UI/ManagementUI/Inventory/W_Inventory_ItemTooltip.W_Inventory_ItemTooltip_C:CheckInputWearableTooltipButtonViaTags",
+}
+
 local INVENTORY_TYPE_MAIN_CONTAINER = 1
 local INVENTORY_TYPE_MELEE_SLOT = 3
 local INVENTORY_TYPE_RANGED_SLOT = 4
-local QUICK_SLOT_UPDATE_BASE_FUNCTION =
-    "/Script/G1R.QuickSlotBase:UpdateToolTipBaseItem"
-local WEARABLE_COMPARISON_SPEC_TEXT = "Item.Property.Wereable"
-local WEARABLE_COMPARISON_SOURCE_PATHS = {
-    "/Script/Angelscript.Default__ItAt_Ring_Enlight",
-    "/Script/Angelscript.Default__ItAt_Amulet_Life",
-    "/Script/Angelscript.Default__NH_Armor",
-    "/Script/Angelscript.Default__Grd_Armor",
+local WIDGET_SET_VISIBILITY_FUNCTION =
+    "/Script/UMG.Widget:SetVisibility"
+local GAMEPLAY_STATICS_DEFAULT_OBJECT =
+    "/Script/Engine.Default__GameplayStatics"
+local WEAPON_COMPARISON_RETRY_DELAYS_MS = {
+    50, 100, 200, 350, 500, 750, 1000, 1500,
+}
+local HOOK_REGISTRATION_RETRY_INITIAL_MS = 50
+local HOOK_REGISTRATION_RETRY_MAX_MS = 2000
+local HOTBAR_CREATION_MAX_ATTEMPTS = 3
+local HOTBAR_CREATION_RETRY_ATTEMPTS = {
+    [0] = true,
+    [3] = true,
+    [6] = true,
+    [7] = true,
 }
 
 local INVENTORY_MAIN_PATH_NEEDLES = {
@@ -65,11 +82,27 @@ local config = {}
 local registered_hooks = {}
 local hook_retry_logged = {}
 local handled_ui_notification_classes = {}
+local hook_registration_retry_pending = false
+local hook_registration_immediate_pending = false
+local hook_registration_retry_delay_ms =
+    HOOK_REGISTRATION_RETRY_INITIAL_MS
+local hook_registration_complete_handled = false
 local cached_inventory_main = nil
 local cached_wearables_bar = nil
 local cached_hotbar = nil
-local wearable_comparison_spec = nil
-local wearable_spec_wait_logged = false
+local widget_set_visibility_function = nil
+local gameplay_statics_default = nil
+local comparison_clock_source_logged = nil
+local hotbar_creation_requested_for_controller = {}
+local inventory_session_token = 0
+local weapon_comparison_settle_pending = false
+local weapon_comparison_settle_timer_generation = 0
+local weapon_comparison_settle_timer_due_at_ms = nil
+local weapon_comparison_bridge_busy = false
+local weapon_comparison_hint_reassert_pending = false
+local weapon_comparison_hint_reassert_token = nil
+local weapon_comparison_hint_reassert_inventory_main_key = nil
+local weapon_comparison_hint_reassert_label = nil
 local last_hover_at = {}
 local active_equipped_hover = {
     active = false,
@@ -84,29 +117,41 @@ local active_equipped_hover = {
 local active_inventory_comparison = {
     active = false,
     token = 0,
-    slot = nil,
     slot_key = nil,
     item_pos = nil,
     inventory_main = nil,
+    inventory_main_key = nil,
+    weapon_type = nil,
+    definition_name = nil,
+    resolution_attempt = 0,
+    comparison_attempt = 0,
+    settle_not_before_ms = nil,
 }
 local active_weapon_comparison = {
     active = false,
     token = 0,
-    slot_started = false,
-    hotbar = nil,
-    weapon_slot = nil,
-    weapon_position = nil,
     compare_widget = nil,
-    previous_show_tooltips = nil,
-    previous_base_widget = nil,
-    previous_slot_widget = nil,
+    source_inventory_main_key = nil,
+    source_slot_key = nil,
+    source_item_pos = nil,
+    source_weapon_type = nil,
+    source_definition_name = nil,
 }
 local refresh_inventory_main_from_slot = nil
+local reset_inventory_runtime_state = nil
+local on_slot_hovered = nil
 
 local function merge_list(defaults, override)
     local parsed = pleasureLib:split_list(override)
     if #parsed > 0 then return parsed end
     return pleasureLib:copy_array(defaults)
+end
+
+local function weapon_comparison_hover_settle_ms(value)
+    local delay_ms = math.floor(tonumber(value)
+        or DEFAULT_CONFIG.TooltipCooldownMs)
+    return math.max(WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS,
+        math.min(WEAPON_COMPARISON_HOVER_SETTLE_MAX_MS, delay_ms))
 end
 
 local function config_candidate_paths()
@@ -147,15 +192,29 @@ local function load_config()
             config.ComparisonDefaultEnabled = pleasureLib:parse_bool(
                 ini.COMPARISONDEFAULTENABLED,
                 config.ComparisonDefaultEnabled)
+            local configured_cooldown =
+                tonumber(ini.TOOLTIPCOOLDOWNMS)
+                    or config.TooltipCooldownMs
             config.TooltipCooldownMs =
-                tonumber(ini.TOOLTIPCOOLDOWNMS) or config.TooltipCooldownMs
+                weapon_comparison_hover_settle_ms(configured_cooldown)
             config.SlotHoverHooks = merge_list(
                 SLOT_HOVER_HOOKS, ini.SLOTHOVERHOOKS)
             config.SlotUnhoverHooks = merge_list(
                 SLOT_UNHOVER_HOOKS, ini.SLOTUNHOVERHOOKS)
 
-            pleasureLib:set_debug(config.Debug)
             config.ConfigPath = path
+            pleasureLib:set_debug(config.Debug)
+            if configured_cooldown ~= config.TooltipCooldownMs then
+                local normalized = pleasureLib:update_ini_value(
+                    path, "TooltipCooldownMs",
+                    tostring(config.TooltipCooldownMs))
+                pleasureLib:debug_log(
+                    "clamped weapon comparison delay"
+                    .. " configuredMs=" .. tostring(configured_cooldown)
+                    .. " effectiveMs="
+                    .. tostring(config.TooltipCooldownMs)
+                    .. " persisted=" .. tostring(normalized))
+            end
             pleasureLib:log("Loaded config from " .. tostring(path)
                 .. ": Enabled=" .. tostring(config.Enabled)
                 .. " Debug=" .. tostring(config.Debug)
@@ -220,21 +279,110 @@ local COMPARISON_DEFAULT_SETTING_TRANSLATIONS = {
             },
 }
 
-local function is_valid(obj)
-    if pleasureLib:is_valid(obj) then return true end
+local WEAPON_COMPARISON_DELAY_SETTING_TRANSLATIONS = {
+    en = {
+        name = "Weapon comparison delay",
+        description = "Time in milliseconds a backpack weapon must remain hovered before its comparison is built. The Ctrl hint appears immediately.",
+    },
+    de = {
+        name = "Waffenvergleich-Verzoegerung",
+        description = "Zeit in Millisekunden, die eine Rucksackwaffe ausgewaehlt bleiben muss, bevor ihr Vergleich aufgebaut wird. Der Strg-Hinweis erscheint sofort.",
+    },
+}
 
-    -- Preserve the stable mod's more permissive fallback for a few UE4SS
-    -- wrappers whose IsValid result is unavailable but GetFullName still is.
-    return pleasureLib:try(function()
-        if type(obj.GetFullName) ~= "function" then return false end
-        return obj:GetFullName() ~= nil
-    end) == true
+local function setting_persist_options(key)
+    return {
+        path = function() return config.ConfigPath end,
+        key = key,
+    }
+end
+
+local function register_game_settings()
+    pleasureLib:register_game_bool_setting({
+        id = "ExtendedItemTooltips.ComparisonDefaultEnabled",
+        section = "Extended Item Tooltips",
+        default = DEFAULT_CONFIG.ComparisonDefaultEnabled,
+        get = function()
+            return config.ComparisonDefaultEnabled == true
+        end,
+        set = function(value)
+            config.ComparisonDefaultEnabled = value == true
+            return true
+        end,
+        persist = setting_persist_options("ComparisonDefaultEnabled"),
+        translations = COMPARISON_DEFAULT_SETTING_TRANSLATIONS,
+    })
+
+    local required_api = {
+        "register_game_int_setting",
+    }
+    for _, api_name in ipairs(required_api) do
+        if type(pleasureLib[api_name]) ~= "function" then
+            pleasureLib:log("PleasureLib 0.5.0 settings API unavailable: "
+                .. api_name)
+            return false
+        end
+    end
+
+    pleasureLib:register_game_int_setting({
+        id = "ExtendedItemTooltips.TooltipCooldownMs",
+        section = "Extended Item Tooltips",
+        minimum = WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS,
+        maximum = WEAPON_COMPARISON_HOVER_SETTLE_MAX_MS,
+        default = DEFAULT_CONFIG.TooltipCooldownMs,
+        get = function()
+            return config.TooltipCooldownMs
+        end,
+        set = function(value)
+            config.TooltipCooldownMs =
+                weapon_comparison_hover_settle_ms(value)
+            return true
+        end,
+        persist = setting_persist_options("TooltipCooldownMs"),
+        translations = WEAPON_COMPARISON_DELAY_SETTING_TRANSLATIONS,
+    })
+
+    return true
+end
+
+local function is_valid(obj)
+    -- PleasureLib already falls back to GetFullName when IsValid is
+    -- unavailable, but preserves an explicit false. Do not rehabilitate
+    -- stale widgets from a previous save merely because they still have a
+    -- readable object name.
+    return pleasureLib:is_valid(obj)
 end
 
 local function full_name(obj)
     local name = pleasureLib:full_name(obj)
     if name ~= "" or not is_valid(obj) then return name end
     return pleasureLib:try(function() return obj:GetFullName() end) or ""
+end
+
+local function object_instance_key(obj)
+    if not is_valid(obj) then return "" end
+    local address = pleasureLib:try(function()
+        if type(obj.GetAddress) == "function" then
+            return obj:GetAddress()
+        end
+        return nil
+    end)
+    local numeric_address = tonumber(address)
+    if numeric_address ~= nil and numeric_address ~= 0 then
+        return full_name(obj) .. "|@" .. tostring(address)
+    end
+    return full_name(obj)
+end
+
+local function object_world_key(obj)
+    if not is_valid(obj) then return "" end
+    local world = pleasureLib:try(function()
+        if type(obj.GetWorld) == "function" then return obj:GetWorld() end
+        return nil
+    end)
+    world = pleasureLib:unwrap(world)
+    if not is_valid(world) then return "" end
+    return object_instance_key(world)
 end
 
 local function object_class_token(obj)
@@ -331,89 +479,6 @@ local function ufunction_loaded(path)
     return is_valid(pleasureLib:find_object(path))
 end
 
-local function gameplay_tag_candidates(tag_name)
-    local candidates = {}
-    local fname = pleasureLib:try(function()
-        return FName(tag_name)
-    end)
-    if fname == nil then return candidates end
-
-    local function add(builder)
-        local tag = pleasureLib:try(builder)
-        if tag ~= nil then table.insert(candidates, tag) end
-    end
-
-    -- Match the construction order proven by QuickBites in this game build.
-    -- The field is assigned only; it is never read or converted to a string.
-    add(function()
-        if type(FGameplayTag) ~= "function" then return nil end
-        local tag = FGameplayTag()
-        tag.TagName = fname
-        return tag
-    end)
-    add(function()
-        if type(FGameplayTag) ~= "function" then return nil end
-        return FGameplayTag(fname)
-    end)
-    add(function()
-        if type(FGameplayTag) ~= "function" then return nil end
-        return FGameplayTag(tag_name)
-    end)
-
-    -- UE4SS also accepts a plain struct-shaped Lua table for small reflected
-    -- FGameplayTag parameters. QuickBites needs this fallback on some builds.
-    table.insert(candidates, { TagName = fname })
-
-    return candidates
-end
-
-local function item_has_spec(item, tag)
-    if not is_valid(item) or tag == nil then return false end
-
-    local exact = pleasureLib:try(function()
-        return pleasureLib:unwrap(item:HasItemSpecExactly(tag))
-    end)
-    if exact == true then return true end
-
-    return pleasureLib:try(function()
-        return pleasureLib:unwrap(item:HasItemSpec(tag))
-    end) == true
-end
-
-local function resolve_wearable_comparison_spec()
-    if wearable_comparison_spec ~= nil then
-        return wearable_comparison_spec
-    end
-
-    local candidates = gameplay_tag_candidates(WEARABLE_COMPARISON_SPEC_TEXT)
-    local valid_sources = 0
-    for candidate_index, tag in ipairs(candidates)
-    do
-        for _, path in ipairs(WEARABLE_COMPARISON_SOURCE_PATHS) do
-            local source_item = pleasureLib:find_object(path)
-            if is_valid(source_item) then
-                valid_sources = valid_sources + 1
-                if item_has_spec(source_item, tag) then
-                    wearable_comparison_spec = tag
-                    wearable_spec_wait_logged = false
-                    pleasureLib:debug_log("resolved native wearable comparison spec"
-                        .. " source=" .. full_name(source_item)
-                        .. " candidate=" .. tostring(candidate_index))
-                    return tag
-                end
-            end
-        end
-    end
-
-    if wearable_spec_wait_logged ~= true then
-        wearable_spec_wait_logged = true
-        pleasureLib:debug_log("native wearable comparison spec unresolved"
-            .. " candidates=" .. tostring(#candidates)
-            .. " validSourceChecks=" .. tostring(valid_sources))
-    end
-    return nil
-end
-
 local function related_object_with_name(start_object, needle)
     local current = pleasureLib:unwrap(start_object)
     local depth = 0
@@ -475,19 +540,64 @@ end
 
 local function run_later(ms, fn)
     if type(fn) ~= "function" then return false end
-    -- Keep the established two-stage scheduling behavior while delegating
-    -- the generic delayed callback to PleasureLib. Generation guards remain
-    -- mod-specific so callbacks from an old hotreload cannot touch new UI.
-    return pleasureLib:delay(ms, function()
-        if not generation_is_current() then return end
-        if type(ExecuteInGameThread) == "function" then
-            ExecuteInGameThread(function()
-                if generation_is_current() then fn() end
-            end)
-        else
-            fn()
-        end
+    -- Schedule directly on the game thread so rapid hover events cannot
+    -- build a second queue of callbacks waiting to be marshalled later.
+    return pleasureLib:delay_game_thread(ms, function()
+        if generation_is_current() then fn() end
     end)
+end
+
+local function comparison_clock_ms(world_context)
+    if not is_valid(gameplay_statics_default) then
+        gameplay_statics_default =
+            pleasureLib:find_object(GAMEPLAY_STATICS_DEFAULT_OBJECT)
+    end
+
+    local real_time_seconds = pleasureLib:try(function()
+        if is_valid(gameplay_statics_default)
+            and type(gameplay_statics_default.GetRealTimeSeconds)
+                == "function"
+        then
+            return gameplay_statics_default:GetRealTimeSeconds(
+                world_context)
+        end
+        return nil
+    end)
+    real_time_seconds =
+        tonumber(pleasureLib:unwrap(real_time_seconds))
+    if real_time_seconds ~= nil then
+        if comparison_clock_source_logged ~= "GameplayStatics" then
+            comparison_clock_source_logged = "GameplayStatics"
+            pleasureLib:debug_log(
+                "weapon comparison clock source=GameplayStatics")
+        end
+        return math.floor(real_time_seconds * 1000)
+    end
+
+    local world = pleasureLib:try(function()
+        if is_valid(world_context)
+            and type(world_context.GetWorld) == "function"
+        then
+            return world_context:GetWorld()
+        end
+        return nil
+    end)
+    world = pleasureLib:unwrap(world)
+    real_time_seconds =
+        tonumber(property_value(world, "RealTimeSeconds"))
+    if real_time_seconds ~= nil then
+        if comparison_clock_source_logged ~= "UWorld" then
+            comparison_clock_source_logged = "UWorld"
+            pleasureLib:debug_log(
+                "weapon comparison clock source=UWorld")
+        end
+        return math.floor(real_time_seconds * 1000)
+    end
+
+    -- Never mix this world-relative clock with a different time origin while
+    -- the inventory is being torn down. Callers safely fall back to a full
+    -- settle window when no comparable timestamp is available.
+    return nil
 end
 
 local function inventory_wearable_tooltip_widget(inventory_main)
@@ -520,13 +630,16 @@ local function set_widget_reference(owner, property_name, target, label)
     if not is_valid(owner) or not is_valid(target) then return false end
 
     local current = property_value(owner, property_name)
-    if is_valid(current) and full_name(current) == full_name(target) then
+    if is_valid(current)
+        and object_instance_key(current) == object_instance_key(target)
+    then
         return true
     end
 
     local ok, result = set_property_value(owner, property_name, target)
     local after = property_value(owner, property_name)
-    local linked = is_valid(after) and full_name(after) == full_name(target)
+    local linked = is_valid(after)
+        and object_instance_key(after) == object_instance_key(target)
     if not linked and type(owner.SetPropertyValue) == "function" then
         local setter_ok, setter_result = pcall(function()
             return owner:SetPropertyValue(property_name, target)
@@ -534,7 +647,8 @@ local function set_widget_reference(owner, property_name, target, label)
         ok = setter_ok
         result = setter_result
         after = property_value(owner, property_name)
-        linked = is_valid(after) and full_name(after) == full_name(target)
+        linked = is_valid(after)
+            and object_instance_key(after) == object_instance_key(target)
     end
 
     if linked then
@@ -669,6 +783,13 @@ local function on_inventory_shown(_hook_name, context)
     local inventory_main = pleasureLib:unwrap(context)
     if not is_valid(inventory_main) then return nil end
 
+    if type(reset_inventory_runtime_state) == "function" then
+        reset_inventory_runtime_state("inventory.shown")
+    end
+    hotbar_creation_requested_for_controller = {}
+    cached_inventory_main = inventory_main
+    cached_wearables_bar = nil
+    cached_hotbar = nil
     set_wearable_compare_flag(inventory_main,
         config.EnableComparisonTooltips == true
             and config.ComparisonDefaultEnabled == true,
@@ -676,8 +797,12 @@ local function on_inventory_shown(_hook_name, context)
     return nil
 end
 
-local function set_widget_visibility(widget, visibility, label)
-    if config.ForceTooltipVisibility ~= true then return false end
+local function set_widget_visibility(widget, visibility, label, ignore_config)
+    if ignore_config ~= true
+        and config.ForceTooltipVisibility ~= true
+    then
+        return false
+    end
     if not is_valid(widget) then return false end
 
     local wanted = tostring(visibility)
@@ -709,6 +834,60 @@ local function set_widget_visibility(widget, visibility, label)
     return false
 end
 
+local function set_live_widget_visibility(widget, visibility, label)
+    if config.ForceTooltipVisibility ~= true then return false end
+    if not is_valid(widget) then return false end
+
+    if not is_valid(widget_set_visibility_function) then
+        widget_set_visibility_function =
+            pleasureLib:find_object(WIDGET_SET_VISIBILITY_FUNCTION)
+    end
+
+    local before = widget_visibility_value(widget)
+    local mode = nil
+    local call_result = nil
+    if is_valid(widget_set_visibility_function) then
+        local reflected_ok, reflected_result = pcall(function()
+            return widget_set_visibility_function(widget, visibility)
+        end)
+        if reflected_ok then
+            mode = "reflected"
+            call_result = reflected_result
+        end
+    end
+
+    if mode == nil then
+        local method_ok, method_result = pcall(function()
+            if type(widget.SetVisibility) ~= "function" then
+                return false
+            end
+            widget:SetVisibility(visibility)
+            return true
+        end)
+        if method_ok and method_result == true then
+            mode = "method"
+            call_result = method_result
+        end
+    end
+
+    -- A direct UPROPERTY write does not update the live Slate widget. Keep it
+    -- only as a degraded fallback after both real UWidget setters failed.
+    if mode == nil and set_widget_visibility(
+        widget, visibility, label .. ".fallback")
+    then
+        mode = "property-fallback"
+    end
+
+    local after = widget_visibility_value(widget)
+    pleasureLib:debug_log("updated live tooltip widget visibility"
+        .. " label=" .. tostring(label)
+        .. " mode=" .. tostring(mode)
+        .. " before=" .. tostring(before)
+        .. " after=" .. tostring(after)
+        .. " result=" .. tostring(call_result))
+    return mode ~= nil and tostring(after) == tostring(visibility)
+end
+
 local function force_weapon_comparison_hint(inventory_main, visible, label)
     local tooltip_widget = inventory_main_tooltip_widget(inventory_main)
     local hint_widget = property_value(tooltip_widget,
@@ -718,25 +897,77 @@ local function force_weapon_comparison_hint(inventory_main, visible, label)
             .. " label=" .. tostring(label))
         return false
     end
-    return set_widget_visibility(hint_widget, visible and 4 or 1,
+    return set_live_widget_visibility(hint_widget, visible and 4 or 1,
         tostring(label) .. ".comparisonHint")
 end
 
-local function maintain_weapon_comparison_hint(inventory_main, slot, label)
-    local token = active_inventory_comparison.token
-    force_weapon_comparison_hint(inventory_main, true,
-        tostring(label) .. ".immediate")
-    run_later(10, function()
-        if active_inventory_comparison.active == true
-            and active_inventory_comparison.token == token
-            and active_inventory_comparison.slot == slot
-            and is_valid(slot)
-            and bool_property(slot, "Hovered") == true
+local function schedule_weapon_comparison_hint_reassert(label)
+    if active_inventory_comparison.active ~= true
+        or active_inventory_comparison.weapon_type == nil
+    then
+        return false
+    end
+
+    weapon_comparison_hint_reassert_token =
+        active_inventory_comparison.token
+    weapon_comparison_hint_reassert_inventory_main_key =
+        active_inventory_comparison.inventory_main_key
+    weapon_comparison_hint_reassert_label = tostring(label)
+    if weapon_comparison_hint_reassert_pending then return true end
+
+    weapon_comparison_hint_reassert_pending = true
+    local scheduled = run_later(0, function()
+        weapon_comparison_hint_reassert_pending = false
+        local requested_token =
+            weapon_comparison_hint_reassert_token
+        local requested_inventory_main_key =
+            weapon_comparison_hint_reassert_inventory_main_key
+        local requested_label =
+            weapon_comparison_hint_reassert_label
+        weapon_comparison_hint_reassert_token = nil
+        weapon_comparison_hint_reassert_inventory_main_key = nil
+        weapon_comparison_hint_reassert_label = nil
+
+        if active_inventory_comparison.active ~= true
+            or active_inventory_comparison.weapon_type == nil
+            or active_inventory_comparison.token ~= requested_token
+            or active_inventory_comparison.inventory_main_key
+                ~= requested_inventory_main_key
         then
-            force_weapon_comparison_hint(inventory_main, true,
-                tostring(label) .. ".afterHover")
+            return
         end
+        force_weapon_comparison_hint(
+            active_inventory_comparison.inventory_main, true,
+            tostring(requested_label) .. ".postUpdate")
     end)
+    if not scheduled then
+        weapon_comparison_hint_reassert_pending = false
+    end
+    return scheduled
+end
+
+local function on_inventory_tooltip_updated(_hook_name, context)
+    if config.Enabled ~= true
+        or config.EnableComparisonTooltips ~= true
+        or active_inventory_comparison.active ~= true
+        or active_inventory_comparison.weapon_type == nil
+    then
+        return nil
+    end
+
+    local updated_tooltip = pleasureLib:unwrap(context)
+    local inventory_main = active_inventory_comparison.inventory_main
+    local base_tooltip = inventory_main_tooltip_widget(inventory_main)
+    if not is_valid(updated_tooltip)
+        or object_instance_key(updated_tooltip)
+            ~= object_instance_key(base_tooltip)
+    then
+        return nil
+    end
+
+    force_weapon_comparison_hint(inventory_main, true,
+        "comparison.tooltipUpdated")
+    return nil
 end
 
 local function force_equipped_tooltip_widgets(wearables_bar, inventory_main, label, token)
@@ -848,27 +1079,36 @@ end
 local function first_hotbar_weapon_position(hotbar, inventory_type)
     local slots = property_value(hotbar, "m_SlotsData")
     local slot_count = array_length(slots)
-    if slot_count == nil or slot_count <= 0 then return nil, nil end
+    if slot_count == nil or slot_count <= 0 then
+        return nil, nil, false
+    end
 
     local inventory_base = property_value(hotbar, "m_InventoryBase")
-    if not is_valid(inventory_base) then return nil, nil end
+    if not is_valid(inventory_base) then return nil, nil, false end
     local valid_fn = pleasureLib:try(function()
         return inventory_base["IsItemValidByPos"]
     end)
     local definition_fn = pleasureLib:try(function()
         return inventory_base["GetBaseConfigByPos"]
     end)
-    if valid_fn == nil or definition_fn == nil then return nil, nil end
+    if valid_fn == nil or definition_fn == nil then
+        return nil, nil, false
+    end
 
+    local scan_complete = true
     for position = 0, slot_count - 1 do
         local valid_ok, item_valid = pcall(function()
             return valid_fn(inventory_base, position)
         end)
+        if not valid_ok then scan_complete = false end
         if valid_ok and pleasureLib:unwrap(item_valid) == true then
             local definition_ok, definition = pcall(function()
                 return definition_fn(inventory_base, position)
             end)
             definition = pleasureLib:unwrap(definition)
+            if not definition_ok or not is_valid(definition) then
+                scan_complete = false
+            end
             if definition_ok and is_valid(definition) then
                 local matches = false
                 if inventory_type == INVENTORY_TYPE_RANGED_SLOT then
@@ -889,12 +1129,12 @@ local function first_hotbar_weapon_position(hotbar, inventory_type)
                     .. " position=" .. tostring(position)
                     .. " definition=" .. full_name(definition)
                     .. " matches=" .. tostring(matches))
-                if matches then return position, definition end
+                if matches then return position, definition, true end
             end
         end
     end
 
-    return nil, nil
+    return nil, nil, scan_complete
 end
 
 refresh_inventory_main_from_slot = function(slot)
@@ -925,13 +1165,13 @@ refresh_inventory_main_from_slot = function(slot)
     return cached_inventory_main
 end
 
-local function hover_allowed(slot)
+local function equipped_rehover_allowed(slot)
     local key = full_name(slot)
     if key == "" then return true end
 
     local now = math.floor(os.clock() * 1000)
     local previous = last_hover_at[key] or -1000000
-    if now - previous < math.max(0, tonumber(config.TooltipCooldownMs) or 0) then
+    if now - previous < EQUIPPED_HOVER_DUPLICATE_COOLDOWN_MS then
         return false
     end
     last_hover_at[key] = now
@@ -943,7 +1183,7 @@ local function begin_equipped_hover(slot, inventory_main, wearables_bar, item_po
     active_equipped_hover.active = true
     active_equipped_hover.token = active_equipped_hover.token + 1
     active_equipped_hover.slot = slot
-    active_equipped_hover.slot_key = full_name(slot)
+    active_equipped_hover.slot_key = object_instance_key(slot)
     active_equipped_hover.item_pos = item_pos
     active_equipped_hover.inventory_main = inventory_main
     active_equipped_hover.wearables_bar = wearables_bar
@@ -977,7 +1217,7 @@ end
 
 local function equipped_hover_matches(slot, item_pos)
     if active_equipped_hover.active ~= true then return false end
-    return active_equipped_hover.slot_key == full_name(slot)
+    return active_equipped_hover.slot_key == object_instance_key(slot)
         and active_equipped_hover.item_pos == item_pos
 end
 
@@ -1009,33 +1249,70 @@ local function stop_active_equipped_hover(label)
     return true
 end
 
-local function find_weapon_hotbar()
-    if is_valid(cached_hotbar)
-        and is_valid(property_value(cached_hotbar, "m_InventoryBase"))
-    then
-        return cached_hotbar
-    end
-    cached_hotbar = nil
-    local function accept_hotbar(candidate, source)
+local function find_weapon_hotbar(
+    inventory_main, inventory_type, comparison_attempt)
+    comparison_attempt = tonumber(comparison_attempt) or 0
+    local expected_world = object_world_key(inventory_main)
+    local fallback = nil
+    local seen = {}
+
+    local function hotbar_is_shaped(candidate)
         candidate = pleasureLib:unwrap(candidate)
-        if is_valid(candidate)
+        return is_valid(candidate)
             and is_valid(property_value(candidate, "m_InventoryBase"))
             and (is_valid(property_value(candidate, "Slot_Melee"))
                 or is_valid(property_value(candidate, "Slot_Ranged")))
+    end
+
+    local function inspect_hotbar(candidate, source)
+        candidate = pleasureLib:unwrap(candidate)
+        if not hotbar_is_shaped(candidate) then return nil end
+
+        local candidate_world = object_world_key(candidate)
+        if expected_world ~= "" and candidate_world ~= ""
+            and candidate_world ~= expected_world
         then
+            pleasureLib:debug_log("ignored hotbar from another world"
+                .. " source=" .. tostring(source)
+                .. " world=" .. tostring(candidate_world)
+                .. " expected=" .. tostring(expected_world))
+            return nil
+        end
+
+        local candidate_key = object_instance_key(candidate)
+        if seen[candidate_key] == true then return nil end
+        seen[candidate_key] = true
+
+        local position, definition, ready =
+            first_hotbar_weapon_position(candidate, inventory_type)
+        if position ~= nil and is_valid(definition) then
             cached_hotbar = candidate
-            pleasureLib:debug_log("resolved weapon hotbar source=" .. tostring(source)
-                .. " object=" .. full_name(candidate))
+            pleasureLib:debug_log("resolved matching weapon hotbar"
+                .. " source=" .. tostring(source)
+                .. " object=" .. full_name(candidate)
+                .. " position=" .. tostring(position))
             return candidate
         end
+
+        if fallback == nil then fallback = candidate end
+        pleasureLib:debug_log("inspected weapon hotbar candidate"
+            .. " source=" .. tostring(source)
+            .. " ready=" .. tostring(ready)
+            .. " object=" .. full_name(candidate))
         return nil
     end
+
+    if is_valid(cached_hotbar) then
+        local matched = inspect_hotbar(cached_hotbar, "cache")
+        if matched ~= nil then return matched end
+    end
+    cached_hotbar = nil
 
     local controllers = pleasureLib:find_all_of("HUDQuickSlotController")
     if type(controllers) == "table" then
         for _, object in ipairs(controllers) do
             local controller = pleasureLib:unwrap(object)
-            local hotbar = accept_hotbar(
+            local hotbar = inspect_hotbar(
                 property_value(controller, "m_QuickSlot"), "controller")
             if hotbar ~= nil then return hotbar end
         end
@@ -1044,18 +1321,35 @@ local function find_weapon_hotbar()
     local objects = pleasureLib:find_all_of("W_Hotbar_C")
     if type(objects) == "table" then
         for _, object in ipairs(objects) do
-            local hotbar = accept_hotbar(object, "objectScan")
+            local hotbar = inspect_hotbar(object, "objectScan")
             if hotbar ~= nil then return hotbar end
         end
     end
 
     -- Vanilla clears the hidden keyboard hotbar. Drive the same instant
-    -- press/release path the game uses so it creates a normal instance,
-    -- without latching it visible like AlwaysVisibleHotbar does.
+    -- press/release path a bounded number of times so it creates a normal
+    -- instance without latching it visible like AlwaysVisibleHotbar does.
     if type(controllers) == "table" then
         for _, object in ipairs(controllers) do
             local controller = pleasureLib:unwrap(object)
-            if is_valid(controller) then
+            local controller_world = object_world_key(controller)
+            local same_world = expected_world == ""
+                or controller_world == ""
+                or controller_world == expected_world
+            local controller_key = object_instance_key(controller)
+            local creation_attempts = tonumber(
+                hotbar_creation_requested_for_controller[controller_key])
+                or 0
+            local current_hotbar =
+                property_value(controller, "m_QuickSlot")
+            if is_valid(controller) and same_world
+                and not hotbar_is_shaped(current_hotbar)
+                and creation_attempts < HOTBAR_CREATION_MAX_ATTEMPTS
+                and HOTBAR_CREATION_RETRY_ATTEMPTS[comparison_attempt]
+                    == true
+            then
+                hotbar_creation_requested_for_controller[controller_key] =
+                    creation_attempts + 1
                 local pressed, press_error = pcall(function()
                     controller:QuickSlotBindingPress()
                     controller:QuickSlotBindingRelease()
@@ -1063,18 +1357,21 @@ local function find_weapon_hotbar()
                 pleasureLib:debug_log("requested vanilla hotbar creation"
                     .. " ok=" .. tostring(pressed)
                     .. " error=" .. tostring(press_error))
-                local hotbar = accept_hotbar(
+                local hotbar = inspect_hotbar(
                     property_value(controller, "m_QuickSlot"),
                     "controllerAfterTap")
                 if hotbar ~= nil then return hotbar end
             end
         end
     end
-    return nil
+
+    if fallback ~= nil then
+        cached_hotbar = fallback
+    end
+    return fallback
 end
 
-local function item_definition_from_inventory_slot(slot, inventory_main)
-    local item_pos = slot_item_pos(slot)
+local function item_definition_from_inventory_position(inventory_main, item_pos)
     if item_pos == nil or item_pos < 0 then return nil end
 
     local inventory_base = property_value(inventory_main, "InventoryBase")
@@ -1108,93 +1405,31 @@ local function definition_is_a(definition, class_name)
     return pleasureLib:try(function() return definition:IsA(class_name) end) == true
 end
 
-local function hovered_weapon_inventory_type(slot, inventory_main)
-    local definition = item_definition_from_inventory_slot(slot, inventory_main)
-    if not is_valid(definition) then return nil, "" end
+local function weapon_inventory_type_at_position(inventory_main, item_pos)
+    local definition =
+        item_definition_from_inventory_position(inventory_main, item_pos)
+    if not is_valid(definition) then return nil, "", false end
 
     if definition_is_a(definition, "/Script/G1R.WeaponRangedDefinition")
         or definition_is_a(definition, "/Script/G1R.WeaponArcheryDefinition")
     then
-        return INVENTORY_TYPE_RANGED_SLOT, full_name(definition)
+        return INVENTORY_TYPE_RANGED_SLOT, full_name(definition), true
     end
     if definition_is_a(definition, "/Script/G1R.WeaponMeleeDefinition") then
-        return INVENTORY_TYPE_MELEE_SLOT, full_name(definition)
+        return INVENTORY_TYPE_MELEE_SLOT, full_name(definition), true
     end
-    return nil, full_name(definition)
-end
-
-local function ensure_weapon_native_comparison_spec(slot, inventory_main)
-    if slot_has_hotbar_assignment(slot) then return false end
-
-    local definition = item_definition_from_inventory_slot(slot, inventory_main)
-    if not is_valid(definition) then return false end
-    if not definition_is_a(definition, "/Script/G1R.WeaponMeleeDefinition")
-        and not definition_is_a(definition, "/Script/G1R.WeaponRangedDefinition")
-        and not definition_is_a(definition, "/Script/G1R.WeaponArcheryDefinition")
-    then
-        return false
-    end
-
-    local tag = resolve_wearable_comparison_spec()
-    if tag == nil then return false end
-    if item_has_spec(definition, tag) then return true end
-
-    local ok, result = pcall(function()
-        return definition:AddItemSpec(tag)
-    end)
-    local confirmed = ok and item_has_spec(definition, tag)
-    pleasureLib:debug_log("patched weapon for native comparison input"
-        .. " definition=" .. full_name(definition)
-        .. " ok=" .. tostring(ok)
-        .. " confirmed=" .. tostring(confirmed)
-        .. " result=" .. tostring(result))
-    return confirmed
+    return nil, full_name(definition), true
 end
 
 local function inventory_weapon_compare_widget(inventory_main)
     for _, property_name in ipairs({
         "W_Inventory_ItemTooltip_ItemInSlotToAssignTo_Compare",
         "W_Inventory_ItemTooltip_ItemInSlotToAssignTo_1_Compare",
-        "W_Inventory_ItemTooltip_ItemInSlotToAssignTo_Wearable",
     }) do
         local widget = property_value(inventory_main, property_name)
         if is_valid(widget) then return widget end
     end
     return nil
-end
-
-local function call_hotbar_base_tooltip(hotbar, item_pos)
-    local fn = pleasureLib:try(function() return hotbar["UpdateToolTipBaseItem"] end)
-    local call_source = "member"
-    local ok = false
-    local result = nil
-
-    if is_valid(fn) then
-        ok, result = pcall(function()
-            return fn(hotbar, item_pos, INVENTORY_TYPE_MAIN_CONTAINER)
-        end)
-    end
-
-    -- UE4SS normally resolves inherited UFunctions through UObject.__index.
-    -- W_Hotbar_C does not expose this inherited native function that way in
-    -- this game build, so invoke the reflected UFunction with the hotbar as
-    -- its explicit calling context instead.
-    if not ok then
-        fn = pleasureLib:find_object(QUICK_SLOT_UPDATE_BASE_FUNCTION)
-        call_source = "reflected"
-        if is_valid(fn) then
-            ok, result = pcall(function()
-                return fn(hotbar, item_pos, INVENTORY_TYPE_MAIN_CONTAINER)
-            end)
-        end
-    end
-
-    pleasureLib:debug_log("updated hotbar comparison base"
-        .. " itemPos=" .. tostring(item_pos)
-        .. " source=" .. tostring(call_source)
-        .. " ok=" .. tostring(ok)
-        .. " result=" .. tostring(pleasureLib:unwrap(result)))
-    return ok and pleasureLib:unwrap(result) ~= false
 end
 
 local function copy_inventory_tooltip_info(inventory_main, hotbar)
@@ -1225,70 +1460,24 @@ end
 
 local function clear_weapon_comparison_state()
     active_weapon_comparison.active = false
-    active_weapon_comparison.slot_started = false
-    active_weapon_comparison.hotbar = nil
-    active_weapon_comparison.weapon_slot = nil
-    active_weapon_comparison.weapon_position = nil
     active_weapon_comparison.compare_widget = nil
-    active_weapon_comparison.previous_show_tooltips = nil
-    active_weapon_comparison.previous_base_widget = nil
-    active_weapon_comparison.previous_slot_widget = nil
+    active_weapon_comparison.source_inventory_main_key = nil
+    active_weapon_comparison.source_slot_key = nil
+    active_weapon_comparison.source_item_pos = nil
+    active_weapon_comparison.source_weapon_type = nil
+    active_weapon_comparison.source_definition_name = nil
 end
 
 local function end_weapon_comparison(label)
     if active_weapon_comparison.active ~= true then return false end
 
-    local hotbar = active_weapon_comparison.hotbar
-    local weapon_position = active_weapon_comparison.weapon_position
     local compare_widget = active_weapon_comparison.compare_widget
-    local slot_started = active_weapon_comparison.slot_started == true
     active_weapon_comparison.token = active_weapon_comparison.token + 1
-    local base_restored = false
-    local slot_restored = false
-    if is_valid(hotbar) then
-        -- Restore the slot target first. Restoring the base target can make
-        -- the hidden vanilla hotbar rebuild its tooltip state immediately;
-        -- touching the slot target afterwards caused the observed native
-        -- access violation during rapid grid hovers.
-        if is_valid(active_weapon_comparison.previous_slot_widget) then
-            slot_restored = set_widget_reference(hotbar,
-                "W_Inventory_ItemTooltip_ItemInSlotToAssignTo",
-                active_weapon_comparison.previous_slot_widget,
-                tostring(label) .. ".restoreSlot")
-        end
-        if is_valid(active_weapon_comparison.previous_base_widget) then
-            base_restored = set_widget_reference(hotbar,
-                "W_Inventory_ItemTooltip_ItemToAssign",
-                active_weapon_comparison.previous_base_widget,
-                tostring(label) .. ".restoreBase")
-        end
-    end
-
-    -- Never let the hotbar's close path run while it still targets the
-    -- inventory widgets. On a slot-to-slot hover transition the game has
-    -- already populated the next main tooltip before this cleanup executes.
-    if slot_started and base_restored and slot_restored
-        and weapon_position ~= nil
-    then
-        call_hotbar_slot_tooltip(hotbar, weapon_position, false)
-    elseif slot_started then
-        pleasureLib:debug_log("skipped hotbar weapon comparison cleanup: widgets not restored"
-            .. " baseRestored=" .. tostring(base_restored)
-            .. " slotRestored=" .. tostring(slot_restored))
-    end
-
-    if slot_started then
-        set_widget_visibility(compare_widget, 1,
-            tostring(label) .. ".weaponCompare")
-    end
-    if is_valid(hotbar) then
-        if active_weapon_comparison.previous_show_tooltips ~= nil then
-            set_property_value(hotbar, "ShowToolTips",
-                active_weapon_comparison.previous_show_tooltips)
-        end
-    end
-
     clear_weapon_comparison_state()
+    -- The hotbar bridge is restored before a comparison becomes active.
+    -- Cleanup therefore only touches the long-lived InventoryMain widget.
+    set_widget_visibility(compare_widget, 1,
+        tostring(label) .. ".weaponCompare", true)
     return true
 end
 
@@ -1297,189 +1486,550 @@ local function maintain_weapon_comparison_visibility(compare_widget, label)
         tostring(label) .. ".immediate")
 end
 
-local function begin_weapon_comparison(slot, inventory_main, attempt)
-    attempt = tonumber(attempt) or 0
-    local weapon_type, definition_name = hovered_weapon_inventory_type(
-        slot, inventory_main)
-    if weapon_type == nil then return false end
+local function weapon_comparison_source_matches(
+    inventory_main_key, slot_key, item_pos, weapon_type, definition_name)
+    if active_weapon_comparison.active ~= true then return false end
+    if not is_valid(active_weapon_comparison.compare_widget) then return false end
+    return active_weapon_comparison.source_inventory_main_key
+            == inventory_main_key
+        and active_weapon_comparison.source_slot_key == slot_key
+        and active_weapon_comparison.source_item_pos == item_pos
+        and active_weapon_comparison.source_weapon_type == weapon_type
+        and active_weapon_comparison.source_definition_name
+            == definition_name
+end
 
-    local hotbar = find_weapon_hotbar()
-    if not is_valid(hotbar) then
-        if attempt < 3 then
-            local comparison_token = active_inventory_comparison.token
-            local scheduled = run_later(50 * (attempt + 1), function()
-                if active_inventory_comparison.active == true
-                    and active_inventory_comparison.token == comparison_token
-                    and is_valid(slot)
-                    and is_valid(inventory_main)
-                then
-                    begin_weapon_comparison(slot, inventory_main, attempt + 1)
-                end
-            end)
-            pleasureLib:debug_log("weapon comparison waiting for vanilla hotbar"
-                .. " attempt=" .. tostring(attempt + 1)
-                .. " scheduled=" .. tostring(scheduled)
-                .. " definition=" .. tostring(definition_name))
-            return scheduled
+local function restore_widget_reference(
+    owner, property_name, previous, label)
+    if is_valid(previous) then
+        if set_widget_reference(
+            owner, property_name, previous, label)
+        then
+            return true
         end
-        pleasureLib:debug_log("weapon comparison skipped: vanilla hotbar unavailable"
-            .. " attempts=" .. tostring(attempt)
-            .. " definition=" .. tostring(definition_name))
+
+        -- If exact restoration fails, at least remove the borrowed
+        -- InventoryMain reference before leaving the bridge.
+        local cleared = set_property_value(owner, property_name, nil)
+        local safely_cleared = cleared == true
+            and not is_valid(property_value(owner, property_name))
+        pleasureLib:debug_log(
+            "failed to restore hotbar widget; cleared temporary reference"
+            .. " label=" .. tostring(label)
+            .. " property=" .. tostring(property_name)
+            .. " cleared=" .. tostring(safely_cleared))
         return false
     end
 
-    local weapon_position, weapon_definition = first_hotbar_weapon_position(
-        hotbar, weapon_type)
+    local ok, result = set_property_value(owner, property_name, nil)
+    pleasureLib:debug_log("cleared temporary hotbar widget reference"
+        .. " label=" .. tostring(label)
+        .. " property=" .. tostring(property_name)
+        .. " ok=" .. tostring(ok)
+        .. " result=" .. tostring(result))
+    return ok == true
+        and not is_valid(property_value(owner, property_name))
+end
+
+local function run_weapon_comparison_bridge(
+    hotbar, inventory_main, base_widget, compare_widget, weapon_position)
+    if weapon_comparison_bridge_busy then
+        return false, "bridge busy"
+    end
+
+    local previous_show_tooltips = bool_property(hotbar, "ShowToolTips")
+    local previous_base_widget = property_value(hotbar,
+        "W_Inventory_ItemTooltip_ItemToAssign")
+    local previous_slot_widget = property_value(hotbar,
+        "W_Inventory_ItemTooltip_ItemInSlotToAssignTo")
+    if previous_show_tooltips == nil then
+        return false, "hotbar state snapshot unavailable"
+    end
+
+    weapon_comparison_bridge_busy = true
+    local call_ok, route_ok = pcall(function()
+        local show_set = set_property_value(hotbar, "ShowToolTips", true)
+        if show_set ~= true
+            or bool_property(hotbar, "ShowToolTips") ~= true
+        then
+            return false
+        end
+
+        local linked_base = set_widget_reference(hotbar,
+            "W_Inventory_ItemTooltip_ItemToAssign", base_widget,
+            "weaponComparison.transaction.base")
+        if not linked_base then return false end
+
+        local linked_slot = set_widget_reference(hotbar,
+            "W_Inventory_ItemTooltip_ItemInSlotToAssignTo", compare_widget,
+            "weaponComparison.transaction.slot")
+        if not linked_slot then return false end
+
+        if not copy_inventory_tooltip_info(inventory_main, hotbar) then
+            return false
+        end
+        return call_hotbar_slot_tooltip(
+            hotbar, weapon_position, true) == true
+    end)
+
+    -- Restore the borrowed UObject references and control flag immediately.
+    -- ToolTipInfoBase/Slot are value scratch state owned by the hidden
+    -- hotbar; UE4SS exposes them as live mapped structs, not copy snapshots.
+    -- No InventoryMain widget reference may survive this native call.
+    local slot_restored = restore_widget_reference(hotbar,
+        "W_Inventory_ItemTooltip_ItemInSlotToAssignTo",
+        previous_slot_widget, "weaponComparison.transaction.restoreSlot")
+    local base_restored = restore_widget_reference(hotbar,
+        "W_Inventory_ItemTooltip_ItemToAssign",
+        previous_base_widget, "weaponComparison.transaction.restoreBase")
+    local show_restored = set_property_value(hotbar, "ShowToolTips",
+        previous_show_tooltips) == true
+        and bool_property(hotbar, "ShowToolTips")
+            == previous_show_tooltips
+    weapon_comparison_bridge_busy = false
+
+    local restored = slot_restored and base_restored and show_restored
+    local succeeded = call_ok and route_ok == true and restored
+    pleasureLib:debug_log("completed scoped hotbar comparison"
+        .. " callOk=" .. tostring(call_ok)
+        .. " routeOk=" .. tostring(route_ok)
+        .. " restored=" .. tostring(restored))
+    if succeeded then return true, nil end
+    return false, call_ok and "native route or restore failed"
+        or tostring(route_ok)
+end
+
+local function begin_weapon_comparison(
+    inventory_main, weapon_type, definition_name, source_slot_key,
+    source_item_pos, comparison_token, attempt)
+    attempt = tonumber(attempt) or 0
+    if weapon_type == nil or source_item_pos == nil then
+        return false, false, "invalid comparison snapshot"
+    end
+    if active_inventory_comparison.active ~= true
+        or active_inventory_comparison.token ~= comparison_token
+    then
+        return false, false, "comparison request changed"
+    end
+
+    local source_inventory_main_key =
+        active_inventory_comparison.inventory_main_key
+    if weapon_comparison_source_matches(source_inventory_main_key,
+        source_slot_key, source_item_pos, weapon_type, definition_name)
+    then
+        maintain_weapon_comparison_visibility(
+            active_weapon_comparison.compare_widget,
+            "weaponComparison.unchanged")
+        -- A regular inventory refresh evaluates the weapon's native specs
+        -- and collapses this already-configured wearable-comparison input.
+        -- Restore only its visibility; never mutate the shared item definition.
+        force_weapon_comparison_hint(inventory_main, true,
+            "weaponComparison.unchanged")
+        return true, false, nil
+    end
+
+    if weapon_comparison_bridge_busy then
+        return false, false, "comparison bridge busy"
+    end
+
+    local hotbar = find_weapon_hotbar(
+        inventory_main, weapon_type, attempt)
+    if not is_valid(hotbar) then
+        return false, true, "vanilla hotbar unavailable"
+    end
+
+    local weapon_position, weapon_definition, hotbar_ready =
+        first_hotbar_weapon_position(hotbar, weapon_type)
     if weapon_position == nil or not is_valid(weapon_definition) then
-        pleasureLib:debug_log("weapon comparison skipped: matching hotbar weapon unavailable"
-            .. " inventoryType=" .. tostring(weapon_type)
-            .. " definition=" .. tostring(definition_name))
-        return false
+        if hotbar_ready ~= true then
+            return false, true, "hotbar inventory not ready"
+        end
+        return false, true, "matching hotbar weapon unavailable"
     end
 
     local base_widget = inventory_main_tooltip_widget(inventory_main)
     local compare_widget = inventory_weapon_compare_widget(inventory_main)
     if not is_valid(base_widget) or not is_valid(compare_widget) then
-        pleasureLib:debug_log("weapon comparison skipped: inventory tooltip widgets unavailable")
-        return false
+        return false, true, "inventory tooltip widgets unavailable"
     end
 
     local hotbar_slot_count = array_length(property_value(hotbar, "m_SlotsData"))
     if hotbar_slot_count == nil or weapon_position == nil or weapon_position < 0
         or weapon_position >= hotbar_slot_count
     then
-        pleasureLib:debug_log("weapon comparison skipped: hotbar slot index unavailable"
+        return false, true, "hotbar slot index unavailable"
             .. " position=" .. tostring(weapon_position)
-            .. " slotCount=" .. tostring(hotbar_slot_count))
-        return false
+            .. " slotCount=" .. tostring(hotbar_slot_count)
     end
     pleasureLib:debug_log("resolved hotbar weapon comparison entry"
         .. " position=" .. tostring(weapon_position)
         .. " inventoryType=" .. tostring(weapon_type)
         .. " definition=" .. full_name(weapon_definition))
 
-    if active_weapon_comparison.active == true
-        and full_name(active_weapon_comparison.hotbar) == full_name(hotbar)
+    -- Hotbar creation can dispatch UI events. Do not enter the native bridge
+    -- if one of them replaced this hover while readiness was being resolved.
+    if active_inventory_comparison.active ~= true
+        or active_inventory_comparison.token ~= comparison_token
+        or active_inventory_comparison.inventory_main_key
+            ~= source_inventory_main_key
+        or active_inventory_comparison.slot_key ~= source_slot_key
+        or active_inventory_comparison.item_pos ~= source_item_pos
     then
-        active_weapon_comparison.token =
-            active_weapon_comparison.token + 1
-        active_weapon_comparison.weapon_slot = weapon_definition
-        active_weapon_comparison.weapon_position = weapon_position
-        active_weapon_comparison.compare_widget = compare_widget
-
-        set_property_value(hotbar, "ShowToolTips", true)
-        local linked_base = set_widget_reference(hotbar,
-            "W_Inventory_ItemTooltip_ItemToAssign", base_widget,
-            "weaponComparison.refresh.base")
-        local linked_slot = set_widget_reference(hotbar,
-            "W_Inventory_ItemTooltip_ItemInSlotToAssignTo", compare_widget,
-            "weaponComparison.refresh.slot")
-        local base_updated = linked_base
-            and copy_inventory_tooltip_info(inventory_main, hotbar)
-        local slot_updated = linked_slot and base_updated
-            and call_hotbar_slot_tooltip(hotbar, weapon_position, true)
-
-        if not slot_updated then
-            pleasureLib:debug_log("weapon comparison in-place refresh failed"
-                .. " inventoryType=" .. tostring(weapon_type)
-                .. " position=" .. tostring(weapon_position)
-                .. " definition=" .. tostring(definition_name))
-            end_weapon_comparison("weaponComparison.refreshFailed")
-            return false
-        end
-
-        active_weapon_comparison.slot_started = true
-        maintain_weapon_comparison_visibility(compare_widget,
-            "weaponComparison.refresh")
-        pleasureLib:debug_log("weapon comparison refreshed in place"
-            .. " inventoryType=" .. tostring(weapon_type)
-            .. " position=" .. tostring(weapon_position)
-            .. " definition=" .. tostring(definition_name))
-        return true
+        return false, false, "comparison request changed during readiness"
     end
 
     if active_weapon_comparison.active == true then
-        end_weapon_comparison("weaponComparison.hotbarChanged")
+        end_weapon_comparison("weaponComparison.replace")
     end
 
-    active_weapon_comparison.active = true
-    active_weapon_comparison.slot_started = false
-    active_weapon_comparison.token = active_weapon_comparison.token + 1
-    active_weapon_comparison.hotbar = hotbar
-    active_weapon_comparison.weapon_slot = weapon_definition
-    active_weapon_comparison.weapon_position = weapon_position
-    active_weapon_comparison.compare_widget = compare_widget
-    active_weapon_comparison.previous_show_tooltips =
-        bool_property(hotbar, "ShowToolTips")
-    active_weapon_comparison.previous_base_widget = property_value(hotbar,
-        "W_Inventory_ItemTooltip_ItemToAssign")
-    active_weapon_comparison.previous_slot_widget = property_value(hotbar,
-        "W_Inventory_ItemTooltip_ItemInSlotToAssignTo")
-
-    set_property_value(hotbar, "ShowToolTips", true)
-    local linked_base = set_widget_reference(hotbar,
-        "W_Inventory_ItemTooltip_ItemToAssign", base_widget,
-        "weaponComparison.base")
-    local linked_slot = set_widget_reference(hotbar,
-        "W_Inventory_ItemTooltip_ItemInSlotToAssignTo", compare_widget,
-        "weaponComparison.slot")
-    -- InventoryMain already owns the exact tooltip info produced by the
-    -- native grid hover. Copying the property avoids resolving the filtered
-    -- ItemPos a second time through the hotbar's unrelated inventory view.
-    local base_updated = linked_base
-        and copy_inventory_tooltip_info(inventory_main, hotbar)
-    local slot_updated = linked_slot and base_updated
-        and call_hotbar_slot_tooltip(hotbar, weapon_position, true)
-    active_weapon_comparison.slot_started = slot_updated == true
-
-    if not slot_updated then
+    local route_ok, route_error = run_weapon_comparison_bridge(
+        hotbar, inventory_main, base_widget, compare_widget,
+        weapon_position)
+    if not route_ok then
+        set_widget_visibility(compare_widget, 1,
+            "weaponComparison.bridgeFailed", true)
         pleasureLib:debug_log("weapon comparison native route failed"
+            .. " reason=" .. tostring(route_error)
             .. " inventoryType=" .. tostring(weapon_type)
             .. " position=" .. tostring(weapon_position)
             .. " definition=" .. tostring(definition_name))
-        end_weapon_comparison("weaponComparison.failed")
-        return false
+        -- A native bridge failure is not retried for the same hover.
+        return false, false, route_error
     end
+
+    if active_inventory_comparison.active ~= true
+        or active_inventory_comparison.token ~= comparison_token
+        or active_inventory_comparison.slot_key ~= source_slot_key
+        or active_inventory_comparison.item_pos ~= source_item_pos
+    then
+        set_widget_visibility(compare_widget, 1,
+            "weaponComparison.requestChanged", true)
+        return false, false, "comparison request changed during bridge"
+    end
+
+    active_weapon_comparison.active = true
+    active_weapon_comparison.token = active_weapon_comparison.token + 1
+    active_weapon_comparison.compare_widget = compare_widget
+    active_weapon_comparison.source_inventory_main_key =
+        source_inventory_main_key
+    active_weapon_comparison.source_slot_key = source_slot_key
+    active_weapon_comparison.source_item_pos = source_item_pos
+    active_weapon_comparison.source_weapon_type = weapon_type
+    active_weapon_comparison.source_definition_name = definition_name
 
     maintain_weapon_comparison_visibility(compare_widget,
         "weaponComparison")
+    -- UpdateToolTipOnSlot refreshes the base tooltip synchronously and hides
+    -- this input for weapons because they have no wearable ItemSpec. Reassert
+    -- the configured CTRL hint only after the native bridge has returned.
+    force_weapon_comparison_hint(inventory_main, true,
+        "weaponComparison.afterBridge")
     pleasureLib:debug_log("weapon comparison active"
         .. " inventoryType=" .. tostring(weapon_type)
         .. " position=" .. tostring(weapon_position)
         .. " definition=" .. tostring(definition_name))
-    return true
+    return true, false, nil
+end
+
+local function invalidate_weapon_comparison_settle_timer()
+    weapon_comparison_settle_timer_generation =
+        weapon_comparison_settle_timer_generation + 1
+    weapon_comparison_settle_pending = false
+    weapon_comparison_settle_timer_due_at_ms = nil
+end
+
+local function clear_inventory_comparison_state()
+    invalidate_weapon_comparison_settle_timer()
+    active_inventory_comparison.active = false
+    active_inventory_comparison.slot_key = nil
+    active_inventory_comparison.item_pos = nil
+    active_inventory_comparison.inventory_main = nil
+    active_inventory_comparison.inventory_main_key = nil
+    active_inventory_comparison.weapon_type = nil
+    active_inventory_comparison.definition_name = nil
+    active_inventory_comparison.resolution_attempt = 0
+    active_inventory_comparison.comparison_attempt = 0
+    active_inventory_comparison.settle_not_before_ms = nil
+    weapon_comparison_hint_reassert_token = nil
+    weapon_comparison_hint_reassert_inventory_main_key = nil
+    weapon_comparison_hint_reassert_label = nil
 end
 
 local function end_inventory_comparison(inventory_main, label)
     if active_inventory_comparison.active ~= true then return false end
 
     active_inventory_comparison.token = active_inventory_comparison.token + 1
-    inventory_main = pleasureLib:unwrap(inventory_main)
-    if not is_valid(inventory_main) then
-        inventory_main = active_inventory_comparison.inventory_main
-    end
     end_weapon_comparison(tostring(label) .. ".weapon")
-
-    active_inventory_comparison.active = false
-    active_inventory_comparison.slot = nil
-    active_inventory_comparison.slot_key = nil
-    active_inventory_comparison.item_pos = nil
-    active_inventory_comparison.inventory_main = nil
+    clear_inventory_comparison_state()
     return true
 end
 
+reset_inventory_runtime_state = function(label)
+    inventory_session_token = inventory_session_token + 1
+
+    if active_equipped_hover.active == true then
+        stop_active_equipped_hover(tostring(label) .. ".equipped")
+    end
+    if active_inventory_comparison.active == true then
+        end_inventory_comparison(
+            active_inventory_comparison.inventory_main,
+            tostring(label) .. ".inventory")
+    elseif active_weapon_comparison.active == true then
+        end_weapon_comparison(tostring(label) .. ".weapon")
+    end
+
+    active_inventory_comparison.token =
+        active_inventory_comparison.token + 1
+    clear_inventory_comparison_state()
+    active_equipped_hover.token = active_equipped_hover.token + 1
+    last_hover_at = {}
+    cached_inventory_main = nil
+    cached_wearables_bar = nil
+    cached_hotbar = nil
+end
 
 local function inventory_comparison_matches(slot, item_pos)
     if active_inventory_comparison.active ~= true then return false end
-    return active_inventory_comparison.slot_key == full_name(slot)
+    return active_inventory_comparison.slot_key == object_instance_key(slot)
         and active_inventory_comparison.item_pos == item_pos
+end
+
+local schedule_weapon_comparison_settle = nil
+
+local function settle_active_inventory_comparison()
+    if active_inventory_comparison.active ~= true then return false end
+
+    local comparison_token = active_inventory_comparison.token
+    local inventory_main = active_inventory_comparison.inventory_main
+    local inventory_main_key =
+        active_inventory_comparison.inventory_main_key
+    local item_pos = active_inventory_comparison.item_pos
+    if not is_valid(inventory_main)
+        or object_instance_key(inventory_main) ~= inventory_main_key
+    then
+        end_inventory_comparison(inventory_main,
+            "comparison.inventoryUnavailable")
+        return false
+    end
+
+    local weapon_type = active_inventory_comparison.weapon_type
+    local definition_name =
+        active_inventory_comparison.definition_name or ""
+    if weapon_type == nil then
+        local definition_resolved = false
+        weapon_type, definition_name, definition_resolved =
+            weapon_inventory_type_at_position(inventory_main, item_pos)
+        if active_inventory_comparison.active ~= true
+            or active_inventory_comparison.token ~= comparison_token
+        then
+            return false
+        end
+
+        if definition_resolved ~= true then
+            local attempt =
+                active_inventory_comparison.resolution_attempt + 1
+            local delay_ms =
+                WEAPON_COMPARISON_RETRY_DELAYS_MS[attempt]
+            if delay_ms == nil then
+                pleasureLib:debug_log(
+                    "weapon classification readiness exhausted"
+                    .. " itemPos=" .. tostring(item_pos)
+                    .. " attempts=" .. tostring(
+                        active_inventory_comparison.resolution_attempt))
+                end_inventory_comparison(inventory_main,
+                    "comparison.classificationUnavailable")
+                return false
+            end
+
+            active_inventory_comparison.resolution_attempt = attempt
+            pleasureLib:debug_log(
+                "weapon classification waiting for inventory"
+                .. " itemPos=" .. tostring(item_pos)
+                .. " attempt=" .. tostring(attempt)
+                .. " delayMs=" .. tostring(delay_ms))
+            return schedule_weapon_comparison_settle(delay_ms)
+        end
+
+        if weapon_type == nil then
+            end_inventory_comparison(inventory_main,
+                "comparison.nativeItem")
+            pleasureLib:debug_log("comparison uses native item handling"
+                .. " definition=" .. tostring(definition_name))
+            return false
+        end
+
+        active_inventory_comparison.weapon_type = weapon_type
+        active_inventory_comparison.definition_name = definition_name
+        active_inventory_comparison.resolution_attempt = 0
+    end
+
+    ensure_inventory_tooltip_activation(inventory_main,
+        "comparison.settled")
+    force_weapon_comparison_hint(inventory_main, true,
+        "comparison.settled")
+    if bool_property(inventory_main,
+        "ShouldShowWearableCompare") ~= true
+    then
+        end_weapon_comparison("comparison.disabled")
+        return true
+    end
+
+    local source_slot_key = active_inventory_comparison.slot_key
+    local source_item_pos = active_inventory_comparison.item_pos
+    local attempt = active_inventory_comparison.comparison_attempt
+    local started, retry_ready, reason = begin_weapon_comparison(
+        inventory_main, weapon_type, definition_name, source_slot_key,
+        source_item_pos, comparison_token, attempt)
+    if active_inventory_comparison.active ~= true
+        or active_inventory_comparison.token ~= comparison_token
+    then
+        return false
+    end
+    if started then
+        active_inventory_comparison.comparison_attempt = 0
+        return true
+    end
+    if retry_ready ~= true then
+        pleasureLib:debug_log("weapon comparison stopped for hover"
+            .. " reason=" .. tostring(reason)
+            .. " definition=" .. tostring(definition_name))
+        return false
+    end
+
+    local next_attempt = attempt + 1
+    local delay_ms = WEAPON_COMPARISON_RETRY_DELAYS_MS[next_attempt]
+    if delay_ms == nil then
+        pleasureLib:debug_log("weapon comparison readiness exhausted"
+            .. " reason=" .. tostring(reason)
+            .. " attempts=" .. tostring(attempt)
+            .. " definition=" .. tostring(definition_name))
+        end_inventory_comparison(inventory_main,
+            "weaponComparison.readinessExhausted")
+        return false
+    end
+
+    active_inventory_comparison.comparison_attempt = next_attempt
+    pleasureLib:debug_log("weapon comparison waiting for readiness"
+        .. " reason=" .. tostring(reason)
+        .. " attempt=" .. tostring(next_attempt)
+        .. " delayMs=" .. tostring(delay_ms)
+        .. " definition=" .. tostring(definition_name))
+    return schedule_weapon_comparison_settle(delay_ms)
+end
+
+schedule_weapon_comparison_settle = function(delay_ms)
+    if active_inventory_comparison.active ~= true then return false end
+
+    local inventory_main = active_inventory_comparison.inventory_main
+    local now_ms = comparison_clock_ms(inventory_main)
+    delay_ms = math.max(0, math.floor(tonumber(delay_ms)
+        or weapon_comparison_hover_settle_ms(
+            config.TooltipCooldownMs)))
+    local timer_due_at_ms = nil
+    if now_ms ~= nil then timer_due_at_ms = now_ms + delay_ms end
+
+    -- Keep one effective wake-up. A later request can reuse the existing
+    -- earlier timer; an earlier request supersedes it while the old callback
+    -- becomes a generation-checked no-op.
+    if weapon_comparison_settle_pending then
+        if weapon_comparison_settle_timer_due_at_ms == nil
+            or timer_due_at_ms == nil
+            or weapon_comparison_settle_timer_due_at_ms
+                <= timer_due_at_ms
+        then
+            return true
+        end
+    end
+
+    weapon_comparison_settle_timer_generation =
+        weapon_comparison_settle_timer_generation + 1
+    local timer_generation =
+        weapon_comparison_settle_timer_generation
+    local scheduled_token = active_inventory_comparison.token
+    local session_token = inventory_session_token
+    weapon_comparison_settle_pending = true
+    weapon_comparison_settle_timer_due_at_ms = timer_due_at_ms
+    local scheduled = run_later(delay_ms, function()
+        if timer_generation
+            ~= weapon_comparison_settle_timer_generation
+        then
+            return
+        end
+
+        weapon_comparison_settle_pending = false
+        weapon_comparison_settle_timer_due_at_ms = nil
+        if active_inventory_comparison.active ~= true then return end
+
+        local current_time_ms = comparison_clock_ms(
+            active_inventory_comparison.inventory_main)
+        local settle_not_before_ms = tonumber(
+            active_inventory_comparison.settle_not_before_ms)
+        if current_time_ms ~= nil
+            and settle_not_before_ms ~= nil
+            and current_time_ms < settle_not_before_ms
+        then
+            schedule_weapon_comparison_settle(
+                settle_not_before_ms - current_time_ms)
+            return
+        end
+
+        if inventory_session_token ~= session_token
+            or active_inventory_comparison.token ~= scheduled_token
+        then
+            local replacement_delay_ms = 0
+            if current_time_ms == nil
+                or settle_not_before_ms == nil
+            then
+                replacement_delay_ms =
+                    weapon_comparison_hover_settle_ms(
+                        config.TooltipCooldownMs)
+            end
+            schedule_weapon_comparison_settle(replacement_delay_ms)
+            return
+        end
+        settle_active_inventory_comparison()
+    end)
+    if not scheduled
+        and timer_generation
+            == weapon_comparison_settle_timer_generation
+    then
+        weapon_comparison_settle_pending = false
+        weapon_comparison_settle_timer_due_at_ms = nil
+    end
+    return scheduled
+end
+
+local function schedule_weapon_comparison_hover_settle()
+    if active_inventory_comparison.active ~= true then return false end
+
+    local delay_ms = weapon_comparison_hover_settle_ms(
+        config.TooltipCooldownMs)
+    local current_time_ms = comparison_clock_ms(
+        active_inventory_comparison.inventory_main)
+    active_inventory_comparison.settle_not_before_ms = nil
+    if current_time_ms ~= nil then
+        active_inventory_comparison.settle_not_before_ms =
+            current_time_ms + delay_ms
+    end
+    pleasureLib:debug_log("scheduled weapon comparison hover settle"
+        .. " delayMs=" .. tostring(delay_ms)
+        .. " itemPos="
+        .. tostring(active_inventory_comparison.item_pos))
+    return schedule_weapon_comparison_settle(delay_ms)
 end
 
 local function begin_inventory_comparison(slot)
     if config.EnableComparisonTooltips ~= true then return false end
 
     local inventory_main = related_object_with_name(slot, "W_Inventory_Main")
-    if not is_valid(inventory_main) then return false end
+    if not is_valid(inventory_main) then
+        if active_inventory_comparison.active == true then
+            end_inventory_comparison(
+                active_inventory_comparison.inventory_main,
+                "comparison.inventoryMissing")
+        end
+        return false
+    end
     if slot_has_hotbar_assignment(slot) then
         if active_inventory_comparison.active == true then
             end_inventory_comparison(
@@ -1492,143 +2042,130 @@ local function begin_inventory_comparison(slot)
             .. " slot=" .. full_name(slot))
         return false
     end
-    local weapon_type = hovered_weapon_inventory_type(slot, inventory_main)
-    if weapon_type == nil then
+
+    -- The list slot is virtualized. Read everything needed while the hook
+    -- owns a live object, then keep only scalar identity values.
+    local slot_key = object_instance_key(slot)
+    local item_pos = slot_item_pos(slot)
+    if slot_key == "" or item_pos == nil or item_pos < 0 then
+        if active_inventory_comparison.active == true then
+            end_inventory_comparison(
+                active_inventory_comparison.inventory_main,
+                "comparison.snapshotInvalid")
+        end
+        return false
+    end
+    local inventory_main_key = object_instance_key(inventory_main)
+    local weapon_type, definition_name, definition_resolved =
+        weapon_inventory_type_at_position(inventory_main, item_pos)
+    if definition_resolved == true and weapon_type == nil then
         if active_inventory_comparison.active == true then
             end_inventory_comparison(
                 active_inventory_comparison.inventory_main,
                 "comparison.nativeItem")
         end
-        -- Armor, rings and amulets are compared entirely by the game's
-        -- native left-Control behavior. Do not alter its toggle state.
+        pleasureLib:debug_log("comparison uses native item handling"
+            .. " definition=" .. tostring(definition_name))
         return false
     end
 
-    local comparison_enabled =
-        bool_property(inventory_main, "ShouldShowWearableCompare") == true
-
-    if active_inventory_comparison.active == true
-        and active_weapon_comparison.active == true
-        and comparison_enabled
-    then
+    local same_target = active_inventory_comparison.active == true
+        and active_inventory_comparison.slot_key == slot_key
+        and active_inventory_comparison.item_pos == item_pos
+        and active_inventory_comparison.inventory_main_key
+            == inventory_main_key
+        and active_inventory_comparison.weapon_type == weapon_type
+        and active_inventory_comparison.definition_name
+            == definition_name
+    if same_target then
+        -- A re-hover of the same virtual row is still a newer event. Advance
+        -- the epoch so a queued unhover from its prior incarnation cannot
+        -- clear the current comparison.
         active_inventory_comparison.token =
             active_inventory_comparison.token + 1
-        local comparison_token = active_inventory_comparison.token
-        active_inventory_comparison.slot = slot
-        active_inventory_comparison.slot_key = full_name(slot)
-        active_inventory_comparison.item_pos = slot_item_pos(slot)
-        active_inventory_comparison.inventory_main = inventory_main
-
-        ensure_inventory_tooltip_activation(inventory_main,
-            "comparison.weaponRefresh")
-        maintain_weapon_comparison_hint(inventory_main, slot,
-            "comparison.weaponRefresh")
-        return run_later(10, function()
-            if active_inventory_comparison.active ~= true
-                or active_inventory_comparison.token ~= comparison_token
-                or not is_valid(slot)
-                or not is_valid(inventory_main)
-                or bool_property(inventory_main,
-                    "ShouldShowWearableCompare") ~= true
-            then
-                return
-            end
-            local refreshed = begin_weapon_comparison(slot,
-                inventory_main)
-            if not refreshed
-                and active_weapon_comparison.active == true
-            then
-                end_weapon_comparison(
-                    "weaponComparison.refreshUnavailable")
-            end
-        end)
+        if weapon_type ~= nil then
+            ensure_inventory_tooltip_activation(inventory_main,
+                "comparison.rehover")
+            force_weapon_comparison_hint(inventory_main, true,
+                "comparison.rehover")
+            schedule_weapon_comparison_hint_reassert(
+                "comparison.rehover")
+        end
+        return schedule_weapon_comparison_hover_settle()
     end
 
-    if active_inventory_comparison.active == true then
-        end_inventory_comparison(active_inventory_comparison.inventory_main,
-            "comparison.replace")
+    if active_weapon_comparison.active == true
+        and not weapon_comparison_source_matches(inventory_main_key,
+            slot_key, item_pos, weapon_type, definition_name)
+    then
+        end_weapon_comparison("weaponComparison.targetChanged")
     end
 
     active_inventory_comparison.active = true
-    active_inventory_comparison.token = active_inventory_comparison.token + 1
-    local comparison_token = active_inventory_comparison.token
-    active_inventory_comparison.slot = slot
-    active_inventory_comparison.slot_key = full_name(slot)
-    active_inventory_comparison.item_pos = slot_item_pos(slot)
+    active_inventory_comparison.token =
+        active_inventory_comparison.token + 1
+    active_inventory_comparison.slot_key = slot_key
+    active_inventory_comparison.item_pos = item_pos
     active_inventory_comparison.inventory_main = inventory_main
+    active_inventory_comparison.inventory_main_key = inventory_main_key
+    active_inventory_comparison.weapon_type = weapon_type
+    active_inventory_comparison.definition_name = definition_name
+    active_inventory_comparison.resolution_attempt = 0
+    active_inventory_comparison.comparison_attempt = 0
 
-    ensure_inventory_tooltip_activation(inventory_main, "comparison.begin")
-    maintain_weapon_comparison_hint(inventory_main, slot, "comparison.begin")
-    if not comparison_enabled then return true end
-
-    local comparison_scheduled = run_later(10, function()
-        if active_inventory_comparison.active ~= true
-            or active_inventory_comparison.token ~= comparison_token
-            or not is_valid(slot)
-            or not is_valid(inventory_main)
-            or bool_property(inventory_main,
-                "ShouldShowWearableCompare") ~= true
-        then
-            return
-        end
-        begin_weapon_comparison(slot, inventory_main)
-    end)
-    return comparison_scheduled
+    ensure_inventory_tooltip_activation(inventory_main,
+        "comparison.snapshot")
+    if weapon_type ~= nil then
+        force_weapon_comparison_hint(inventory_main, true,
+            "comparison.snapshot")
+        schedule_weapon_comparison_hint_reassert(
+            "comparison.snapshot")
+    end
+    pleasureLib:debug_log("queued stable weapon comparison snapshot"
+        .. " itemPos=" .. tostring(item_pos)
+        .. " weaponType=" .. tostring(weapon_type)
+        .. " definition=" .. tostring(definition_name))
+    return schedule_weapon_comparison_hover_settle()
 end
 
 local function on_comparison_toggled(_hook_name, context)
     local inventory_main = pleasureLib:unwrap(context)
     if not is_valid(inventory_main) then return nil end
     if active_inventory_comparison.active ~= true then return nil end
-    if full_name(active_inventory_comparison.inventory_main)
-        ~= full_name(inventory_main)
+    if active_inventory_comparison.inventory_main_key
+        ~= object_instance_key(inventory_main)
     then
         return nil
     end
 
-    local comparison_token = active_inventory_comparison.token
-    run_later(1, function()
-        local slot = active_inventory_comparison.slot
-        if active_inventory_comparison.active ~= true
-            or active_inventory_comparison.token ~= comparison_token
-            or not is_valid(slot)
-            or not is_valid(inventory_main)
-            or bool_property(slot, "Hovered") ~= true
-        then
-            return
-        end
-
-        local enabled = bool_property(inventory_main,
-            "ShouldShowWearableCompare") == true
-        force_weapon_comparison_hint(inventory_main, true,
-            "comparison.toggle")
-        if enabled then
-            begin_weapon_comparison(slot, inventory_main)
-        else
-            end_weapon_comparison("comparison.toggleOff")
-        end
-        pleasureLib:debug_log("weapon comparison toggle handled"
-            .. " enabled=" .. tostring(enabled)
-            .. " slot=" .. full_name(slot))
-    end)
+    local enabled = bool_property(inventory_main,
+        "ShouldShowWearableCompare") == true
+    active_inventory_comparison.token =
+        active_inventory_comparison.token + 1
+    active_inventory_comparison.comparison_attempt = 0
+    force_weapon_comparison_hint(inventory_main, true,
+        "comparison.toggle")
+    if enabled then
+        -- Toggling does not restart the hover stability window. If it already
+        -- elapsed, the native comparison starts on the next game-thread tick.
+        schedule_weapon_comparison_settle(0)
+    else
+        end_weapon_comparison("comparison.toggleOff")
+    end
+    pleasureLib:debug_log("weapon comparison toggle handled"
+        .. " enabled=" .. tostring(enabled)
+        .. " itemPos=" .. tostring(
+            active_inventory_comparison.item_pos))
     return nil
 end
 
-local function on_slot_hovered(_hook_name, context)
+on_slot_hovered = function(_hook_name, context)
     if config.Enabled ~= true then return nil end
 
     local slot = pleasureLib:unwrap(context)
     if not is_valid(slot) then return nil end
     if slot_is_main_inventory(slot) then
         stop_active_equipped_hover("gridHover")
-        local inventory_main = related_object_with_name(slot,
-            "W_Inventory_Main")
-        if is_valid(inventory_main) then
-            -- Register the same native comparison input used by armor,
-            -- rings and amulets before W_Inventory_Slot:OnHovered builds
-            -- and forwards this weapon's tooltip info.
-            ensure_weapon_native_comparison_spec(slot, inventory_main)
-        end
         begin_inventory_comparison(slot)
         return nil
     end
@@ -1640,7 +2177,9 @@ local function on_slot_hovered(_hook_name, context)
     end
 
     local item_pos = slot_item_pos(slot)
-    if equipped_hover_matches(slot, item_pos) and not hover_allowed(slot) then
+    if equipped_hover_matches(slot, item_pos)
+        and not equipped_rehover_allowed(slot)
+    then
         return nil
     end
 
@@ -1676,6 +2215,12 @@ local function on_slot_unhovered(_hook_name, context)
     if not is_valid(slot) then return nil end
     if slot_is_main_inventory(slot) then
         local item_pos = slot_item_pos(slot)
+        if bool_property(slot, "Hovered") == true then
+            pleasureLib:debug_log("ignored recycled inventory unhover"
+                .. " slot=" .. full_name(slot)
+                .. " itemPos=" .. tostring(item_pos))
+            return nil
+        end
         if not inventory_comparison_matches(slot, item_pos) then
             pleasureLib:debug_log("ignored stale inventory unhover"
                 .. " slot=" .. full_name(slot)
@@ -1683,13 +2228,15 @@ local function on_slot_unhovered(_hook_name, context)
             return nil
         end
 
+        -- Invalidate settle/readiness work immediately. The delayed cleanup
+        -- exists only to let a following hover claim a newer token.
+        active_inventory_comparison.token =
+            active_inventory_comparison.token + 1
         local token = active_inventory_comparison.token
         local inventory_main = active_inventory_comparison.inventory_main
         run_later(10, function()
             if active_inventory_comparison.active == true
                 and active_inventory_comparison.token == token
-                and inventory_comparison_matches(slot, item_pos)
-                and bool_property(slot, "Hovered") ~= true
             then
                 end_inventory_comparison(inventory_main, "comparison.end")
             end
@@ -1724,7 +2271,7 @@ local function on_slot_unhovered(_hook_name, context)
     return nil
 end
 
-local function register_hook(path, handler)
+local function register_hook(path, handler, post_handler)
     if type(RegisterHook) ~= "function" then
         pleasureLib:log("RegisterHook unavailable")
         return false
@@ -1734,27 +2281,53 @@ local function register_hook(path, handler)
     if not ufunction_loaded(path) then
         if hook_retry_logged[path] ~= "not-loaded" then
             hook_retry_logged[path] = "not-loaded"
-            pleasureLib:debug_log("Hook target not loaded yet; waiting for UI object notification "
+            pleasureLib:debug_log("Hook target not loaded yet; retrying "
                 .. path)
         end
         return false
     end
 
-    local ok = pleasureLib:register_hook(path,
-        function(context, ...)
+    local function guarded(callback)
+        return function(context, ...)
             if not generation_is_current() then return nil end
-            return handler(path, context, ...)
-        end)
-    if not ok then
+            if type(callback) ~= "function" then return nil end
+            return callback(path, context, ...)
+        end
+    end
+
+    local primary_handler = handler
+    local secondary_handler = post_handler
+    if path:sub(1, 8) ~= "/Script/" then
+        -- UE4SS executes callback two after Blueprint functions and ignores
+        -- callback three. Route an explicitly requested post-handler into
+        -- the only callback slot that Blueprint hooks support.
+        primary_handler = post_handler or handler
+        secondary_handler = nil
+    end
+
+    local ok, pre_id, post_id = pcall(function()
+        if type(secondary_handler) == "function" then
+            return RegisterHook(path, guarded(primary_handler),
+                guarded(secondary_handler))
+        end
+        return RegisterHook(path, guarded(primary_handler))
+    end)
+    if not ok or (pre_id == nil and post_id == nil) then
         if hook_retry_logged[path] ~= "not-hookable" then
             hook_retry_logged[path] = "not-hookable"
-            pleasureLib:debug_log("Hook target loaded but not hookable " .. path)
+            pleasureLib:debug_log("Hook target loaded but not hookable "
+                .. path
+                .. " error=" .. tostring(pre_id))
         end
         return false
     end
 
     registered_hooks[path] = true
     hook_retry_logged[path] = nil
+    pleasureLib:debug_log("registered hook"
+        .. " path=" .. tostring(path)
+        .. " preId=" .. tostring(pre_id)
+        .. " postId=" .. tostring(post_id))
     return true
 end
 
@@ -1780,7 +2353,105 @@ local function register_hooks()
             count = count + 1
         end
     end
+    for _, path in ipairs(TOOLTIP_HINT_REFRESH_HOOKS) do
+        if register_hook(path, nil, on_inventory_tooltip_updated) then
+            count = count + 1
+        end
+    end
     return count
+end
+
+local function hook_path_groups()
+    return {
+        config.SlotHoverHooks or {},
+        config.SlotUnhoverHooks or {},
+        COMPARISON_TOGGLE_HOOKS,
+        INVENTORY_SHOWN_HOOKS,
+        TOOLTIP_HINT_REFRESH_HOOKS,
+    }
+end
+
+local function pending_hook_group_count()
+    local pending = 0
+    for _, paths in ipairs(hook_path_groups()) do
+        local has_candidates = false
+        local has_registered_candidate = false
+        for _, path in ipairs(paths) do
+            has_candidates = true
+            if registered_hooks[path] == true then
+                has_registered_candidate = true
+                break
+            end
+        end
+        if has_candidates and not has_registered_candidate then
+            pending = pending + 1
+        end
+    end
+    return pending
+end
+
+local function handle_hook_registration_complete()
+    if hook_registration_complete_handled == true then return end
+    if pending_hook_group_count() ~= 0 then return end
+
+    hook_registration_complete_handled = true
+    hook_registration_retry_delay_ms =
+        HOOK_REGISTRATION_RETRY_INITIAL_MS
+    pleasureLib:debug_log("all inventory hook groups registered")
+end
+
+local schedule_hook_registration_retry
+schedule_hook_registration_retry = function(delay_override_ms)
+    if pending_hook_group_count() == 0 then
+        handle_hook_registration_complete()
+        return true
+    end
+    if hook_registration_retry_pending == true then return true end
+
+    local delay_ms = tonumber(delay_override_ms)
+        or hook_registration_retry_delay_ms
+    hook_registration_retry_pending = true
+    local scheduled = run_later(delay_ms, function()
+        hook_registration_retry_pending = false
+        register_hooks()
+        if pending_hook_group_count() == 0 then
+            handle_hook_registration_complete()
+            return
+        end
+
+        hook_registration_retry_delay_ms = math.min(
+            math.max(HOOK_REGISTRATION_RETRY_INITIAL_MS,
+                hook_registration_retry_delay_ms * 2),
+            HOOK_REGISTRATION_RETRY_MAX_MS)
+        schedule_hook_registration_retry()
+    end)
+    if not scheduled then
+        hook_registration_retry_pending = false
+        pleasureLib:log(
+            "Could not schedule inventory hook registration retry.")
+    end
+    return scheduled
+end
+
+local function schedule_immediate_hook_registration_retry()
+    if pending_hook_group_count() == 0 then
+        handle_hook_registration_complete()
+        return true
+    end
+    if hook_registration_immediate_pending == true then return true end
+
+    hook_registration_immediate_pending = true
+    local scheduled = run_later(0, function()
+        hook_registration_immediate_pending = false
+        register_hooks()
+        if pending_hook_group_count() == 0 then
+            handle_hook_registration_complete()
+        end
+    end)
+    if not scheduled then
+        hook_registration_immediate_pending = false
+    end
+    return scheduled
 end
 
 local function install_ui_object_notifications()
@@ -1795,12 +2466,23 @@ local function install_ui_object_notifications()
         local ok, result = pcall(function()
             return NotifyOnNewObject(notify_class, function(object)
                 if not generation_is_current() then return end
-                if handled_ui_notification_classes[notify_class] == true then return end
+                if handled_ui_notification_classes[notify_class] == true then
+                    return
+                end
                 handled_ui_notification_classes[notify_class] = true
-                pleasureLib:debug_log("UI object created; registering loaded hooks"
+                pleasureLib:debug_log(
+                    "UI object created; registering loaded hooks"
                     .. " class=" .. tostring(notify_class)
                     .. " object=" .. full_name(object))
+
                 register_hooks()
+                if pending_hook_group_count() == 0 then
+                    handle_hook_registration_complete()
+                else
+                    hook_registration_retry_delay_ms =
+                        HOOK_REGISTRATION_RETRY_INITIAL_MS
+                    schedule_immediate_hook_registration_retry()
+                end
             end)
         end)
         if ok then
@@ -1824,24 +2506,14 @@ if config.Enabled ~= true then
 elseif type(RegisterHook) ~= "function" then
     pleasureLib:log("Loaded v" .. VERSION .. " in degraded mode: RegisterHook unavailable.")
 else
-    pleasureLib:register_game_bool_setting({
-        id = "ExtendedItemTooltips.ComparisonDefaultEnabled",
-        default = DEFAULT_CONFIG.ComparisonDefaultEnabled,
-        get = function()
-            return config.ComparisonDefaultEnabled == true
-        end,
-        set = function(value)
-            config.ComparisonDefaultEnabled = value == true
-            return true
-        end,
-        persist = {
-            path = function() return config.ConfigPath end,
-            key = "ComparisonDefaultEnabled",
-        },
-        translations = COMPARISON_DEFAULT_SETTING_TRANSLATIONS,
-    })
+    register_game_settings()
     local notification_count = install_ui_object_notifications()
     local count = register_hooks()
+    if pending_hook_group_count() == 0 then
+        handle_hook_registration_complete()
+    else
+        schedule_hook_registration_retry()
+    end
     pleasureLib:log("Loaded v" .. VERSION .. "; G1R wearable tooltip hooks registered="
         .. tostring(count)
         .. "; UI object notifications=" .. tostring(notification_count)

@@ -70,6 +70,16 @@ if type(Runtime) ~= "table" or type(Runtime.new) ~= "function" then
     return
 end
 
+local Inventory = load_local_module(
+    "extended_item_tooltips_inventory.lua",
+    "extended_item_tooltips_inventory")
+if type(Inventory) ~= "table"
+    or type(Inventory.new) ~= "function"
+then
+    pleasureLib:log("Inventory module factory unavailable")
+    return
+end
+
 local Widgets = load_local_module(
     "extended_item_tooltips_widgets.lua",
     "extended_item_tooltips_widgets")
@@ -104,9 +114,6 @@ local TOOLTIP_HINT_REFRESH_HOOKS = {
     "/Game/UI/ManagementUI/Inventory/W_Inventory_ItemTooltip.W_Inventory_ItemTooltip_C:CheckInputWearableTooltipButtonViaTags",
 }
 
-local INVENTORY_TYPE_MAIN_CONTAINER = 1
-local INVENTORY_TYPE_MELEE_SLOT = 3
-local INVENTORY_TYPE_RANGED_SLOT = 4
 local WEAPON_COMPARISON_RETRY_DELAYS_MS = {
     50, 100, 200, 350, 500, 750, 1000, 1500,
 }
@@ -136,6 +143,16 @@ if not runtime_ok or type(runtime) ~= "table" then
     return
 end
 
+local inventory_ok, inventoryHelpers = pcall(Inventory.new, {
+    pleasure_lib = pleasureLib,
+    runtime = runtime,
+})
+if not inventory_ok or type(inventoryHelpers) ~= "table" then
+    pleasureLib:log("Could not initialize inventory module: "
+        .. tostring(inventoryHelpers))
+    return
+end
+
 local config = configController.values
 local weapon_comparison_hover_settle_ms =
     configController.clamp_weapon_comparison_delay_ms
@@ -157,7 +174,6 @@ local object_world_key = runtime.object_world_key
 local object_is_inventory_main = runtime.object_is_inventory_main
 local property_value = runtime.property_value
 local set_property_value = runtime.set_property_value
-local number_property = runtime.number_property
 local bool_property = runtime.bool_property
 local ufunction_loaded = runtime.ufunction_loaded
 local related_object_with_name = runtime.related_object_with_name
@@ -417,91 +433,6 @@ local function hide_equipped_tooltip_widgets(wearables_bar, inventory_main, labe
     return hidden
 end
 
-local function slot_item_pos(slot)
-    local item_pos = number_property(slot, "ItemPos")
-    if item_pos == nil then
-        item_pos = number_property(property_value(slot, "Inventory Slot Data"), "m_Pos")
-    end
-    return item_pos
-end
-
-local function slot_inventory_type(slot)
-    return number_property(property_value(slot, "Inventory Slot Data"),
-        "m_InventoryType")
-end
-
-local function slot_is_main_inventory(slot)
-    return slot_inventory_type(slot) == INVENTORY_TYPE_MAIN_CONTAINER
-end
-
-local function slot_has_hotbar_assignment(slot)
-    -- W_Inventory_Slot sets this native flag for the numbered badge shown on
-    -- items assigned to the hotbar. Those items are already the equipped
-    -- comparison source and must not start a comparison with themselves.
-    return bool_property(slot, "ShowingHotkey") == true
-end
-
-local function first_hotbar_weapon_position(hotbar, inventory_type)
-    local slots = property_value(hotbar, "m_SlotsData")
-    local slot_count = array_length(slots)
-    if slot_count == nil or slot_count <= 0 then
-        return nil, nil, false
-    end
-
-    local inventory_base = property_value(hotbar, "m_InventoryBase")
-    if not is_valid(inventory_base) then return nil, nil, false end
-    local valid_fn = pleasureLib:try(function()
-        return inventory_base["IsItemValidByPos"]
-    end)
-    local definition_fn = pleasureLib:try(function()
-        return inventory_base["GetBaseConfigByPos"]
-    end)
-    if valid_fn == nil or definition_fn == nil then
-        return nil, nil, false
-    end
-
-    local scan_complete = true
-    for position = 0, slot_count - 1 do
-        local valid_ok, item_valid = pcall(function()
-            return valid_fn(inventory_base, position)
-        end)
-        if not valid_ok then scan_complete = false end
-        if valid_ok and pleasureLib:unwrap(item_valid) == true then
-            local definition_ok, definition = pcall(function()
-                return definition_fn(inventory_base, position)
-            end)
-            definition = pleasureLib:unwrap(definition)
-            if not definition_ok or not is_valid(definition) then
-                scan_complete = false
-            end
-            if definition_ok and is_valid(definition) then
-                local matches = false
-                if inventory_type == INVENTORY_TYPE_RANGED_SLOT then
-                    matches = pleasureLib:try(function()
-                        return definition:IsA(
-                            "/Script/G1R.WeaponRangedDefinition")
-                    end) == true or pleasureLib:try(function()
-                        return definition:IsA(
-                            "/Script/G1R.WeaponArcheryDefinition")
-                    end) == true
-                elseif inventory_type == INVENTORY_TYPE_MELEE_SLOT then
-                    matches = pleasureLib:try(function()
-                        return definition:IsA(
-                            "/Script/G1R.WeaponMeleeDefinition")
-                    end) == true
-                end
-                pleasureLib:debug_log("inspected hotbar item definition"
-                    .. " position=" .. tostring(position)
-                    .. " definition=" .. full_name(definition)
-                    .. " matches=" .. tostring(matches))
-                if matches then return position, definition, true end
-            end
-        end
-    end
-
-    return nil, nil, scan_complete
-end
-
 refresh_inventory_main_from_slot = function(slot)
     local related = related_object_with_name(slot, "W_Inventory_Main")
     if is_valid(related) then
@@ -649,7 +580,9 @@ local function find_weapon_hotbar(
         seen[candidate_key] = true
 
         local position, definition, ready =
-            first_hotbar_weapon_position(candidate, inventory_type)
+            inventoryHelpers.first_hotbar_weapon_position(
+                candidate,
+                inventory_type)
         if position ~= nil and is_valid(definition) then
             cached_hotbar = candidate
             pleasureLib:debug_log("resolved matching weapon hotbar"
@@ -734,56 +667,6 @@ local function find_weapon_hotbar(
         cached_hotbar = fallback
     end
     return fallback
-end
-
-local function item_definition_from_inventory_position(inventory_main, item_pos)
-    if item_pos == nil or item_pos < 0 then return nil end
-
-    local inventory_base = property_value(inventory_main, "InventoryBase")
-    if not is_valid(inventory_base) then return nil end
-
-    local valid_fn = pleasureLib:try(function()
-        return inventory_base["IsItemValidByPos"]
-    end)
-    if valid_fn == nil then return nil end
-    local valid_ok, item_valid = pcall(function()
-        return valid_fn(inventory_base, item_pos)
-    end)
-    if not valid_ok or pleasureLib:unwrap(item_valid) ~= true then return nil end
-
-    local fn = pleasureLib:try(function() return inventory_base["GetBaseConfigByPos"] end)
-    if fn == nil then return nil end
-    local ok, definition = pcall(function()
-        return fn(inventory_base, item_pos)
-    end)
-    definition = pleasureLib:unwrap(definition)
-    pleasureLib:debug_log("resolved hovered item definition"
-        .. " itemPos=" .. tostring(item_pos)
-        .. " ok=" .. tostring(ok)
-        .. " definition=" .. full_name(definition))
-    if ok and is_valid(definition) then return definition end
-    return nil
-end
-
-local function definition_is_a(definition, class_name)
-    if not is_valid(definition) then return false end
-    return pleasureLib:try(function() return definition:IsA(class_name) end) == true
-end
-
-local function weapon_inventory_type_at_position(inventory_main, item_pos)
-    local definition =
-        item_definition_from_inventory_position(inventory_main, item_pos)
-    if not is_valid(definition) then return nil, "", false end
-
-    if definition_is_a(definition, "/Script/G1R.WeaponRangedDefinition")
-        or definition_is_a(definition, "/Script/G1R.WeaponArcheryDefinition")
-    then
-        return INVENTORY_TYPE_RANGED_SLOT, full_name(definition), true
-    end
-    if definition_is_a(definition, "/Script/G1R.WeaponMeleeDefinition") then
-        return INVENTORY_TYPE_MELEE_SLOT, full_name(definition), true
-    end
-    return nil, full_name(definition), true
 end
 
 local function copy_inventory_tooltip_info(inventory_main, hotbar)
@@ -993,7 +876,9 @@ local function begin_weapon_comparison(
     end
 
     local weapon_position, weapon_definition, hotbar_ready =
-        first_hotbar_weapon_position(hotbar, weapon_type)
+        inventoryHelpers.first_hotbar_weapon_position(
+            hotbar,
+            weapon_type)
     if weapon_position == nil or not is_valid(weapon_definition) then
         if hotbar_ready ~= true then
             return false, true, "hotbar inventory not ready"
@@ -1168,7 +1053,9 @@ local function settle_active_inventory_comparison()
     if weapon_type == nil then
         local definition_resolved = false
         weapon_type, definition_name, definition_resolved =
-            weapon_inventory_type_at_position(inventory_main, item_pos)
+            inventoryHelpers.weapon_inventory_type_at_position(
+                inventory_main,
+                item_pos)
         if active_inventory_comparison.active ~= true
             or active_inventory_comparison.token ~= comparison_token
         then
@@ -1376,7 +1263,7 @@ local function begin_inventory_comparison(slot)
         end
         return false
     end
-    if slot_has_hotbar_assignment(slot) then
+    if inventoryHelpers.slot_has_hotbar_assignment(slot) then
         if active_inventory_comparison.active == true then
             end_inventory_comparison("comparison.hotbarAssigned")
         end
@@ -1390,7 +1277,7 @@ local function begin_inventory_comparison(slot)
     -- The list slot is virtualized. Read everything needed while the hook
     -- owns a live object, then keep only scalar identity values.
     local slot_key = object_instance_key(slot)
-    local item_pos = slot_item_pos(slot)
+    local item_pos = inventoryHelpers.slot_item_pos(slot)
     if slot_key == "" or item_pos == nil or item_pos < 0 then
         if active_inventory_comparison.active == true then
             end_inventory_comparison("comparison.snapshotInvalid")
@@ -1399,7 +1286,9 @@ local function begin_inventory_comparison(slot)
     end
     local inventory_main_key = object_instance_key(inventory_main)
     local weapon_type, definition_name, definition_resolved =
-        weapon_inventory_type_at_position(inventory_main, item_pos)
+        inventoryHelpers.weapon_inventory_type_at_position(
+            inventory_main,
+            item_pos)
     if definition_resolved == true and weapon_type == nil then
         if active_inventory_comparison.active == true then
             end_inventory_comparison("comparison.nativeItem")
@@ -1504,7 +1393,7 @@ on_slot_hovered = function(_hook_name, context)
 
     local slot = pleasureLib:unwrap(context)
     if not is_valid(slot) then return nil end
-    if slot_is_main_inventory(slot) then
+    if inventoryHelpers.slot_is_main_inventory(slot) then
         stop_active_equipped_hover("gridHover")
         begin_inventory_comparison(slot)
         return nil
@@ -1515,7 +1404,7 @@ on_slot_hovered = function(_hook_name, context)
         end_inventory_comparison("equippedHover")
     end
 
-    local item_pos = slot_item_pos(slot)
+    local item_pos = inventoryHelpers.slot_item_pos(slot)
     if equipped_hover_matches(slot, item_pos)
         and not equipped_rehover_allowed(slot)
     then
@@ -1552,8 +1441,8 @@ local function on_slot_unhovered(_hook_name, context)
 
     local slot = pleasureLib:unwrap(context)
     if not is_valid(slot) then return nil end
-    if slot_is_main_inventory(slot) then
-        local item_pos = slot_item_pos(slot)
+    if inventoryHelpers.slot_is_main_inventory(slot) then
+        local item_pos = inventoryHelpers.slot_item_pos(slot)
         if bool_property(slot, "Hovered") == true then
             pleasureLib:debug_log("ignored recycled inventory unhover"
                 .. " slot=" .. full_name(slot)
@@ -1583,7 +1472,7 @@ local function on_slot_unhovered(_hook_name, context)
     end
     if bool_property(slot, "IsWearableSlot") ~= true then return nil end
 
-    local item_pos = slot_item_pos(slot)
+    local item_pos = inventoryHelpers.slot_item_pos(slot)
     if not equipped_hover_matches(slot, item_pos) then
         pleasureLib:debug_log("ignored stale equipped unhover"
             .. " slot=" .. full_name(slot)

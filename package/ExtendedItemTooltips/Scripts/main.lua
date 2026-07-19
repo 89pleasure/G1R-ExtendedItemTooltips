@@ -8,6 +8,9 @@ local VERSION = "0.19.7"
 local WEAPON_COMPARISON_HOVER_SETTLE_MIN_MS = 150
 local WEAPON_COMPARISON_HOVER_SETTLE_MAX_MS = 500
 local EQUIPPED_HOVER_DUPLICATE_COOLDOWN_MS = 40
+local EQUIPPED_TOOLTIP_FORCE_DELAYS_MS = {
+    20, 80, 160, 320,
+}
 
 _G.__EXTENDED_ITEM_TOOLTIPS_GENERATION =
     (_G.__EXTENDED_ITEM_TOOLTIPS_GENERATION or 0) + 1
@@ -56,6 +59,8 @@ local TOOLTIP_HINT_REFRESH_HOOKS = {
 local INVENTORY_TYPE_MAIN_CONTAINER = 1
 local INVENTORY_TYPE_MELEE_SLOT = 3
 local INVENTORY_TYPE_RANGED_SLOT = 4
+local WIDGET_VISIBILITY_COLLAPSED = 1
+local WIDGET_VISIBILITY_SELF_HIT_TEST_INVISIBLE = 4
 local WIDGET_SET_VISIBILITY_FUNCTION =
     "/Script/UMG.Widget:SetVisibility"
 local GAMEPLAY_STATICS_DEFAULT_OBJECT =
@@ -129,7 +134,6 @@ local active_inventory_comparison = {
 }
 local active_weapon_comparison = {
     active = false,
-    token = 0,
     compare_widget = nil,
     source_inventory_main_key = nil,
     source_slot_key = nil,
@@ -897,7 +901,9 @@ local function force_weapon_comparison_hint(inventory_main, visible, label)
             .. " label=" .. tostring(label))
         return false
     end
-    return set_live_widget_visibility(hint_widget, visible and 4 or 1,
+    return set_live_widget_visibility(hint_widget,
+        visible and WIDGET_VISIBILITY_SELF_HIT_TEST_INVISIBLE
+            or WIDGET_VISIBILITY_COLLAPSED,
         tostring(label) .. ".comparisonHint")
 end
 
@@ -990,7 +996,8 @@ local function force_equipped_tooltip_widgets(wearables_bar, inventory_main, lab
 
     local forced = false
     for _, entry in ipairs(widgets) do
-        forced = set_widget_visibility(entry.widget, 4,
+        forced = set_widget_visibility(entry.widget,
+            WIDGET_VISIBILITY_SELF_HIT_TEST_INVISIBLE,
             tostring(label) .. "." .. tostring(entry.label)) or forced
     end
     return forced
@@ -1003,22 +1010,15 @@ local function schedule_equipped_tooltip_force(wearables_bar, inventory_main, la
     local token = active_equipped_hover.token
     force_equipped_tooltip_widgets(wearables_bar, inventory_main,
         tostring(label) .. ".immediate", token)
-    run_later(20, function()
-        force_equipped_tooltip_widgets(wearables_bar, inventory_main,
-            tostring(label) .. ".delay20", token)
-    end)
-    run_later(80, function()
-        force_equipped_tooltip_widgets(wearables_bar, inventory_main,
-            tostring(label) .. ".delay80", token)
-    end)
-    run_later(160, function()
-        force_equipped_tooltip_widgets(wearables_bar, inventory_main,
-            tostring(label) .. ".delay160", token)
-    end)
-    run_later(320, function()
-        force_equipped_tooltip_widgets(wearables_bar, inventory_main,
-            tostring(label) .. ".delay320", token)
-    end)
+    local function schedule_force(delay_ms)
+        run_later(delay_ms, function()
+            force_equipped_tooltip_widgets(wearables_bar, inventory_main,
+                tostring(label) .. ".delay" .. tostring(delay_ms), token)
+        end)
+    end
+    for _, delay_ms in ipairs(EQUIPPED_TOOLTIP_FORCE_DELAYS_MS) do
+        schedule_force(delay_ms)
+    end
     return true
 end
 
@@ -1028,7 +1028,8 @@ local function hide_equipped_tooltip_widgets(wearables_bar, inventory_main, labe
     ensure_wearable_tooltip_links(wearables_bar, inventory_main, label)
     local hidden = false
     for _, entry in ipairs(equipped_tooltip_widgets(wearables_bar, inventory_main)) do
-        hidden = set_widget_visibility(entry.widget, 1,
+        hidden = set_widget_visibility(entry.widget,
+            WIDGET_VISIBILITY_COLLAPSED,
             tostring(label) .. "." .. tostring(entry.label)) or hidden
     end
     return hidden
@@ -1472,17 +1473,17 @@ local function end_weapon_comparison(label)
     if active_weapon_comparison.active ~= true then return false end
 
     local compare_widget = active_weapon_comparison.compare_widget
-    active_weapon_comparison.token = active_weapon_comparison.token + 1
     clear_weapon_comparison_state()
     -- The hotbar bridge is restored before a comparison becomes active.
     -- Cleanup therefore only touches the long-lived InventoryMain widget.
-    set_widget_visibility(compare_widget, 1,
+    set_widget_visibility(compare_widget, WIDGET_VISIBILITY_COLLAPSED,
         tostring(label) .. ".weaponCompare", true)
     return true
 end
 
 local function maintain_weapon_comparison_visibility(compare_widget, label)
-    set_widget_visibility(compare_widget, 4,
+    set_widget_visibility(compare_widget,
+        WIDGET_VISIBILITY_SELF_HIT_TEST_INVISIBLE,
         tostring(label) .. ".immediate")
 end
 
@@ -1686,7 +1687,7 @@ local function begin_weapon_comparison(
         hotbar, inventory_main, base_widget, compare_widget,
         weapon_position)
     if not route_ok then
-        set_widget_visibility(compare_widget, 1,
+        set_widget_visibility(compare_widget, WIDGET_VISIBILITY_COLLAPSED,
             "weaponComparison.bridgeFailed", true)
         pleasureLib:debug_log("weapon comparison native route failed"
             .. " reason=" .. tostring(route_error)
@@ -1702,13 +1703,12 @@ local function begin_weapon_comparison(
         or active_inventory_comparison.slot_key ~= source_slot_key
         or active_inventory_comparison.item_pos ~= source_item_pos
     then
-        set_widget_visibility(compare_widget, 1,
+        set_widget_visibility(compare_widget, WIDGET_VISIBILITY_COLLAPSED,
             "weaponComparison.requestChanged", true)
         return false, false, "comparison request changed during bridge"
     end
 
     active_weapon_comparison.active = true
-    active_weapon_comparison.token = active_weapon_comparison.token + 1
     active_weapon_comparison.compare_widget = compare_widget
     active_weapon_comparison.source_inventory_main_key =
         source_inventory_main_key
@@ -1755,7 +1755,7 @@ local function clear_inventory_comparison_state()
     weapon_comparison_hint_reassert_label = nil
 end
 
-local function end_inventory_comparison(inventory_main, label)
+local function end_inventory_comparison(label)
     if active_inventory_comparison.active ~= true then return false end
 
     active_inventory_comparison.token = active_inventory_comparison.token + 1
@@ -1771,9 +1771,7 @@ reset_inventory_runtime_state = function(label)
         stop_active_equipped_hover(tostring(label) .. ".equipped")
     end
     if active_inventory_comparison.active == true then
-        end_inventory_comparison(
-            active_inventory_comparison.inventory_main,
-            tostring(label) .. ".inventory")
+        end_inventory_comparison(tostring(label) .. ".inventory")
     elseif active_weapon_comparison.active == true then
         end_weapon_comparison(tostring(label) .. ".weapon")
     end
@@ -1807,8 +1805,7 @@ local function settle_active_inventory_comparison()
     if not is_valid(inventory_main)
         or object_instance_key(inventory_main) ~= inventory_main_key
     then
-        end_inventory_comparison(inventory_main,
-            "comparison.inventoryUnavailable")
+        end_inventory_comparison("comparison.inventoryUnavailable")
         return false
     end
 
@@ -1836,7 +1833,7 @@ local function settle_active_inventory_comparison()
                     .. " itemPos=" .. tostring(item_pos)
                     .. " attempts=" .. tostring(
                         active_inventory_comparison.resolution_attempt))
-                end_inventory_comparison(inventory_main,
+                end_inventory_comparison(
                     "comparison.classificationUnavailable")
                 return false
             end
@@ -1851,8 +1848,7 @@ local function settle_active_inventory_comparison()
         end
 
         if weapon_type == nil then
-            end_inventory_comparison(inventory_main,
-                "comparison.nativeItem")
+            end_inventory_comparison("comparison.nativeItem")
             pleasureLib:debug_log("comparison uses native item handling"
                 .. " definition=" .. tostring(definition_name))
             return false
@@ -1903,8 +1899,7 @@ local function settle_active_inventory_comparison()
             .. " reason=" .. tostring(reason)
             .. " attempts=" .. tostring(attempt)
             .. " definition=" .. tostring(definition_name))
-        end_inventory_comparison(inventory_main,
-            "weaponComparison.readinessExhausted")
+        end_inventory_comparison("weaponComparison.readinessExhausted")
         return false
     end
 
@@ -2024,17 +2019,13 @@ local function begin_inventory_comparison(slot)
     local inventory_main = related_object_with_name(slot, "W_Inventory_Main")
     if not is_valid(inventory_main) then
         if active_inventory_comparison.active == true then
-            end_inventory_comparison(
-                active_inventory_comparison.inventory_main,
-                "comparison.inventoryMissing")
+            end_inventory_comparison("comparison.inventoryMissing")
         end
         return false
     end
     if slot_has_hotbar_assignment(slot) then
         if active_inventory_comparison.active == true then
-            end_inventory_comparison(
-                active_inventory_comparison.inventory_main,
-                "comparison.hotbarAssigned")
+            end_inventory_comparison("comparison.hotbarAssigned")
         end
         force_weapon_comparison_hint(inventory_main, false,
             "comparison.hotbarAssigned")
@@ -2049,9 +2040,7 @@ local function begin_inventory_comparison(slot)
     local item_pos = slot_item_pos(slot)
     if slot_key == "" or item_pos == nil or item_pos < 0 then
         if active_inventory_comparison.active == true then
-            end_inventory_comparison(
-                active_inventory_comparison.inventory_main,
-                "comparison.snapshotInvalid")
+            end_inventory_comparison("comparison.snapshotInvalid")
         end
         return false
     end
@@ -2060,9 +2049,7 @@ local function begin_inventory_comparison(slot)
         weapon_inventory_type_at_position(inventory_main, item_pos)
     if definition_resolved == true and weapon_type == nil then
         if active_inventory_comparison.active == true then
-            end_inventory_comparison(
-                active_inventory_comparison.inventory_main,
-                "comparison.nativeItem")
+            end_inventory_comparison("comparison.nativeItem")
         end
         pleasureLib:debug_log("comparison uses native item handling"
             .. " definition=" .. tostring(definition_name))
@@ -2172,8 +2159,7 @@ on_slot_hovered = function(_hook_name, context)
     if bool_property(slot, "IsWearableSlot") ~= true then return nil end
 
     if active_inventory_comparison.active == true then
-        end_inventory_comparison(active_inventory_comparison.inventory_main,
-            "equippedHover")
+        end_inventory_comparison("equippedHover")
     end
 
     local item_pos = slot_item_pos(slot)
@@ -2233,12 +2219,11 @@ local function on_slot_unhovered(_hook_name, context)
         active_inventory_comparison.token =
             active_inventory_comparison.token + 1
         local token = active_inventory_comparison.token
-        local inventory_main = active_inventory_comparison.inventory_main
         run_later(10, function()
             if active_inventory_comparison.active == true
                 and active_inventory_comparison.token == token
             then
-                end_inventory_comparison(inventory_main, "comparison.end")
+                end_inventory_comparison("comparison.end")
             end
         end)
         return nil
@@ -2331,52 +2316,54 @@ local function register_hook(path, handler, post_handler)
     return true
 end
 
+local HOOK_GROUPS = {
+    {
+        config_key = "SlotHoverHooks",
+        handler = on_slot_hovered,
+    },
+    {
+        config_key = "SlotUnhoverHooks",
+        handler = on_slot_unhovered,
+    },
+    {
+        paths = COMPARISON_TOGGLE_HOOKS,
+        handler = on_comparison_toggled,
+    },
+    {
+        paths = INVENTORY_SHOWN_HOOKS,
+        handler = on_inventory_shown,
+    },
+    {
+        paths = TOOLTIP_HINT_REFRESH_HOOKS,
+        post_handler = on_inventory_tooltip_updated,
+    },
+}
+
+local function hook_group_paths(group)
+    if group.config_key ~= nil then
+        return config[group.config_key] or {}
+    end
+    return group.paths or {}
+end
+
 local function register_hooks()
     local count = 0
-    for _, path in ipairs(config.SlotHoverHooks or {}) do
-        if register_hook(path, on_slot_hovered) then
-            count = count + 1
-        end
-    end
-    for _, path in ipairs(config.SlotUnhoverHooks or {}) do
-        if register_hook(path, on_slot_unhovered) then
-            count = count + 1
-        end
-    end
-    for _, path in ipairs(COMPARISON_TOGGLE_HOOKS) do
-        if register_hook(path, on_comparison_toggled) then
-            count = count + 1
-        end
-    end
-    for _, path in ipairs(INVENTORY_SHOWN_HOOKS) do
-        if register_hook(path, on_inventory_shown) then
-            count = count + 1
-        end
-    end
-    for _, path in ipairs(TOOLTIP_HINT_REFRESH_HOOKS) do
-        if register_hook(path, nil, on_inventory_tooltip_updated) then
-            count = count + 1
+    for _, group in ipairs(HOOK_GROUPS) do
+        for _, path in ipairs(hook_group_paths(group)) do
+            if register_hook(path, group.handler, group.post_handler) then
+                count = count + 1
+            end
         end
     end
     return count
 end
 
-local function hook_path_groups()
-    return {
-        config.SlotHoverHooks or {},
-        config.SlotUnhoverHooks or {},
-        COMPARISON_TOGGLE_HOOKS,
-        INVENTORY_SHOWN_HOOKS,
-        TOOLTIP_HINT_REFRESH_HOOKS,
-    }
-end
-
 local function pending_hook_group_count()
     local pending = 0
-    for _, paths in ipairs(hook_path_groups()) do
+    for _, group in ipairs(HOOK_GROUPS) do
         local has_candidates = false
         local has_registered_candidate = false
-        for _, path in ipairs(paths) do
+        for _, path in ipairs(hook_group_paths(group)) do
             has_candidates = true
             if registered_hooks[path] == true then
                 has_registered_candidate = true

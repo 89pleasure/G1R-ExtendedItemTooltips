@@ -106,6 +106,16 @@ if type(Widgets) ~= "table" or type(Widgets.new) ~= "function" then
     return
 end
 
+local WeaponBridge = load_local_module(
+    "extended_item_tooltips_weapon_bridge.lua",
+    "extended_item_tooltips_weapon_bridge")
+if type(WeaponBridge) ~= "table"
+    or type(WeaponBridge.new) ~= "function"
+then
+    pleasureLib:log("Weapon bridge module factory unavailable")
+    return
+end
+
 local VERSION = "0.19.7"
 
 local EQUIPPED_HOVER_DUPLICATE_COOLDOWN_MS = 40
@@ -174,12 +184,27 @@ if not widgets_ok or type(widgetHelpers) ~= "table" then
     return
 end
 
+local bridge_ok, weaponBridge = pcall(WeaponBridge.new, {
+    pleasure_lib = pleasureLib,
+    runtime = runtime,
+    set_widget_reference =
+        widgetHelpers.set_widget_reference,
+})
+if not bridge_ok
+    or type(weaponBridge) ~= "table"
+    or type(weaponBridge.is_busy) ~= "function"
+    or type(weaponBridge.run) ~= "function"
+then
+    pleasureLib:log("Could not initialize weapon bridge module: "
+        .. tostring(weaponBridge))
+    return
+end
+
 local is_valid = runtime.is_valid
 local full_name = runtime.full_name
 local object_instance_key = runtime.object_instance_key
 local object_world_key = runtime.object_world_key
 local property_value = runtime.property_value
-local set_property_value = runtime.set_property_value
 local bool_property = runtime.bool_property
 local related_object_with_name = runtime.related_object_with_name
 local tooltip_is_valid = runtime.tooltip_is_valid
@@ -195,7 +220,6 @@ local inventory_main_tooltip_widget =
     widgetHelpers.inventory_main_tooltip_widget
 local inventory_weapon_compare_widget =
     widgetHelpers.inventory_weapon_compare_widget
-local set_widget_reference = widgetHelpers.set_widget_reference
 local ensure_wearable_tooltip_links =
     widgetHelpers.ensure_wearable_tooltip_links
 local equipped_tooltip_widgets =
@@ -216,7 +240,6 @@ local inventory_session_token = 0
 local weapon_comparison_settle_pending = false
 local weapon_comparison_settle_timer_generation = 0
 local weapon_comparison_settle_timer_due_at_ms = nil
-local weapon_comparison_bridge_busy = false
 local weapon_comparison_hint_reassert_pending = false
 local weapon_comparison_hint_reassert_token = nil
 local weapon_comparison_hint_reassert_inventory_main_key = nil
@@ -610,32 +633,6 @@ local function find_weapon_hotbar(
     return fallback
 end
 
-local function copy_inventory_tooltip_info(inventory_main, hotbar)
-    local tooltip_info = property_value(inventory_main, "TooltipInfo")
-    if tooltip_info == nil then return false end
-
-    local ok, result = set_property_value(hotbar, "ToolTipInfoBase",
-        tooltip_info)
-    pleasureLib:debug_log("copied inventory tooltip info to hotbar"
-        .. " ok=" .. tostring(ok)
-        .. " result=" .. tostring(result))
-    return ok == true
-end
-
-local function call_hotbar_slot_tooltip(hotbar, weapon_position, show)
-    local fn = pleasureLib:try(function() return hotbar["UpdateToolTipOnSlot"] end)
-    if fn == nil then return false end
-    local ok, result = pcall(function()
-        return fn(hotbar, weapon_position, show == true)
-    end)
-    pleasureLib:debug_log("updated hotbar weapon comparison"
-        .. " weaponPosition=" .. tostring(weapon_position)
-        .. " show=" .. tostring(show)
-        .. " ok=" .. tostring(ok)
-        .. " result=" .. tostring(result))
-    return ok
-end
-
 local function clear_weapon_comparison_state()
     active_weapon_comparison.active = false
     active_weapon_comparison.compare_widget = nil
@@ -677,106 +674,6 @@ local function weapon_comparison_source_matches(
             == definition_name
 end
 
-local function restore_widget_reference(
-    owner, property_name, previous, label)
-    if is_valid(previous) then
-        if set_widget_reference(
-            owner, property_name, previous, label)
-        then
-            return true
-        end
-
-        -- If exact restoration fails, at least remove the borrowed
-        -- InventoryMain reference before leaving the bridge.
-        local cleared = set_property_value(owner, property_name, nil)
-        local safely_cleared = cleared == true
-            and not is_valid(property_value(owner, property_name))
-        pleasureLib:debug_log(
-            "failed to restore hotbar widget; cleared temporary reference"
-            .. " label=" .. tostring(label)
-            .. " property=" .. tostring(property_name)
-            .. " cleared=" .. tostring(safely_cleared))
-        return false
-    end
-
-    local ok, result = set_property_value(owner, property_name, nil)
-    pleasureLib:debug_log("cleared temporary hotbar widget reference"
-        .. " label=" .. tostring(label)
-        .. " property=" .. tostring(property_name)
-        .. " ok=" .. tostring(ok)
-        .. " result=" .. tostring(result))
-    return ok == true
-        and not is_valid(property_value(owner, property_name))
-end
-
-local function run_weapon_comparison_bridge(
-    hotbar, inventory_main, base_widget, compare_widget, weapon_position)
-    if weapon_comparison_bridge_busy then
-        return false, "bridge busy"
-    end
-
-    local previous_show_tooltips = bool_property(hotbar, "ShowToolTips")
-    local previous_base_widget = property_value(hotbar,
-        "W_Inventory_ItemTooltip_ItemToAssign")
-    local previous_slot_widget = property_value(hotbar,
-        "W_Inventory_ItemTooltip_ItemInSlotToAssignTo")
-    if previous_show_tooltips == nil then
-        return false, "hotbar state snapshot unavailable"
-    end
-
-    weapon_comparison_bridge_busy = true
-    local call_ok, route_ok = pcall(function()
-        local show_set = set_property_value(hotbar, "ShowToolTips", true)
-        if show_set ~= true
-            or bool_property(hotbar, "ShowToolTips") ~= true
-        then
-            return false
-        end
-
-        local linked_base = set_widget_reference(hotbar,
-            "W_Inventory_ItemTooltip_ItemToAssign", base_widget,
-            "weaponComparison.transaction.base")
-        if not linked_base then return false end
-
-        local linked_slot = set_widget_reference(hotbar,
-            "W_Inventory_ItemTooltip_ItemInSlotToAssignTo", compare_widget,
-            "weaponComparison.transaction.slot")
-        if not linked_slot then return false end
-
-        if not copy_inventory_tooltip_info(inventory_main, hotbar) then
-            return false
-        end
-        return call_hotbar_slot_tooltip(
-            hotbar, weapon_position, true) == true
-    end)
-
-    -- Restore the borrowed UObject references and control flag immediately.
-    -- ToolTipInfoBase/Slot are value scratch state owned by the hidden
-    -- hotbar; UE4SS exposes them as live mapped structs, not copy snapshots.
-    -- No InventoryMain widget reference may survive this native call.
-    local slot_restored = restore_widget_reference(hotbar,
-        "W_Inventory_ItemTooltip_ItemInSlotToAssignTo",
-        previous_slot_widget, "weaponComparison.transaction.restoreSlot")
-    local base_restored = restore_widget_reference(hotbar,
-        "W_Inventory_ItemTooltip_ItemToAssign",
-        previous_base_widget, "weaponComparison.transaction.restoreBase")
-    local show_restored = set_property_value(hotbar, "ShowToolTips",
-        previous_show_tooltips) == true
-        and bool_property(hotbar, "ShowToolTips")
-            == previous_show_tooltips
-    weapon_comparison_bridge_busy = false
-
-    local restored = slot_restored and base_restored and show_restored
-    local succeeded = call_ok and route_ok == true and restored
-    pleasureLib:debug_log("completed scoped hotbar comparison"
-        .. " callOk=" .. tostring(call_ok)
-        .. " routeOk=" .. tostring(route_ok)
-        .. " restored=" .. tostring(restored))
-    if succeeded then return true, nil end
-    return false, call_ok and "native route or restore failed"
-        or tostring(route_ok)
-end
-
 local function begin_weapon_comparison(
     inventory_main, weapon_type, definition_name, source_slot_key,
     source_item_pos, comparison_token, attempt)
@@ -806,7 +703,7 @@ local function begin_weapon_comparison(
         return true, false, nil
     end
 
-    if weapon_comparison_bridge_busy then
+    if weaponBridge.is_busy() then
         return false, false, "comparison bridge busy"
     end
 
@@ -862,7 +759,7 @@ local function begin_weapon_comparison(
         end_weapon_comparison("weaponComparison.replace")
     end
 
-    local route_ok, route_error = run_weapon_comparison_bridge(
+    local route_ok, route_error = weaponBridge.run(
         hotbar, inventory_main, base_widget, compare_widget,
         weapon_position)
     if not route_ok then

@@ -19,6 +19,8 @@ This repository contains a UE4SS Lua mod for Gothic 1 Remake.
   owns hook registration, late-UI notifications, and retry state.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_widgets.lua`
   owns tooltip widget discovery, reference linking, and visibility operations.
+- `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_weapon_bridge.lua`
+  owns the scoped native hotbar comparison transaction and restoration.
 - `package/ExtendedItemTooltips/ExtendedItemTooltips.ini` is the user-facing configuration file.
 - `package/ExtendedItemTooltips/enabled.txt` and `readme.txt` are packaged with the mod.
 - `README.md` is the public project documentation.

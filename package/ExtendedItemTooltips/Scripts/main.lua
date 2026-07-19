@@ -62,6 +62,14 @@ if not config_ok or type(configController) ~= "table" then
     return
 end
 
+local Runtime = load_local_module(
+    "extended_item_tooltips_runtime.lua",
+    "extended_item_tooltips_runtime")
+if type(Runtime) ~= "table" or type(Runtime.new) ~= "function" then
+    pleasureLib:log("Runtime module factory unavailable")
+    return
+end
+
 local VERSION = "0.19.7"
 
 local EQUIPPED_HOVER_DUPLICATE_COOLDOWN_MS = 40
@@ -95,8 +103,6 @@ local WIDGET_VISIBILITY_COLLAPSED = 1
 local WIDGET_VISIBILITY_SELF_HIT_TEST_INVISIBLE = 4
 local WIDGET_SET_VISIBILITY_FUNCTION =
     "/Script/UMG.Widget:SetVisibility"
-local GAMEPLAY_STATICS_DEFAULT_OBJECT =
-    "/Script/Engine.Default__GameplayStatics"
 local WEAPON_COMPARISON_RETRY_DELAYS_MS = {
     50, 100, 200, 350, 500, 750, 1000, 1500,
 }
@@ -115,9 +121,37 @@ local INVENTORY_MAIN_PATH_NEEDLES = {
     "InventoryMain",
 }
 
+local runtime_ok, runtime = pcall(Runtime.new, {
+    pleasure_lib = pleasureLib,
+    generation_is_current = generation_is_current,
+    inventory_main_path_needles = INVENTORY_MAIN_PATH_NEEDLES,
+})
+if not runtime_ok or type(runtime) ~= "table" then
+    pleasureLib:log("Could not initialize runtime module: "
+        .. tostring(runtime))
+    return
+end
+
 local config = configController.values
 local weapon_comparison_hover_settle_ms =
     configController.clamp_weapon_comparison_delay_ms
+local is_valid = runtime.is_valid
+local full_name = runtime.full_name
+local object_instance_key = runtime.object_instance_key
+local object_world_key = runtime.object_world_key
+local object_is_inventory_main = runtime.object_is_inventory_main
+local property_value = runtime.property_value
+local set_property_value = runtime.set_property_value
+local number_property = runtime.number_property
+local bool_property = runtime.bool_property
+local widget_visibility_value = runtime.widget_visibility_value
+local ufunction_loaded = runtime.ufunction_loaded
+local related_object_with_name = runtime.related_object_with_name
+local tooltip_is_valid = runtime.tooltip_is_valid
+local call_delegate = runtime.call_delegate
+local run_later = runtime.run_later
+local comparison_clock_ms = runtime.comparison_clock_ms
+local array_length = runtime.array_length
 local registered_hooks = {}
 local hook_retry_logged = {}
 local handled_ui_notification_classes = {}
@@ -130,8 +164,6 @@ local cached_inventory_main = nil
 local cached_wearables_bar = nil
 local cached_hotbar = nil
 local widget_set_visibility_function = nil
-local gameplay_statics_default = nil
-local comparison_clock_source_logged = nil
 local hotbar_creation_requested_for_controller = {}
 local inventory_session_token = 0
 local weapon_comparison_settle_pending = false
@@ -178,261 +210,6 @@ local active_weapon_comparison = {
 local refresh_inventory_main_from_slot = nil
 local reset_inventory_runtime_state = nil
 local on_slot_hovered = nil
-
-local function is_valid(obj)
-    -- PleasureLib already falls back to GetFullName when IsValid is
-    -- unavailable, but preserves an explicit false. Do not rehabilitate
-    -- stale widgets from a previous save merely because they still have a
-    -- readable object name.
-    return pleasureLib:is_valid(obj)
-end
-
-local function full_name(obj)
-    local name = pleasureLib:full_name(obj)
-    if name ~= "" or not is_valid(obj) then return name end
-    return pleasureLib:try(function() return obj:GetFullName() end) or ""
-end
-
-local function object_instance_key(obj)
-    if not is_valid(obj) then return "" end
-    local address = pleasureLib:try(function()
-        if type(obj.GetAddress) == "function" then
-            return obj:GetAddress()
-        end
-        return nil
-    end)
-    local numeric_address = tonumber(address)
-    if numeric_address ~= nil and numeric_address ~= 0 then
-        return full_name(obj) .. "|@" .. tostring(address)
-    end
-    return full_name(obj)
-end
-
-local function object_world_key(obj)
-    if not is_valid(obj) then return "" end
-    local world = pleasureLib:try(function()
-        if type(obj.GetWorld) == "function" then return obj:GetWorld() end
-        return nil
-    end)
-    world = pleasureLib:unwrap(world)
-    if not is_valid(world) then return "" end
-    return object_instance_key(world)
-end
-
-local function object_class_token(obj)
-    local text = full_name(obj)
-    return text:match("^([^%s]+)") or ""
-end
-
-local function object_short_name(obj)
-    local name = pleasureLib:try(function()
-        if type(obj.GetName) == "function" then return obj:GetName() end
-        return nil
-    end)
-    if name ~= nil then return tostring(name) end
-
-    local text = full_name(obj)
-    local path = text:match("%s(.+)$") or text
-    return path:match("([^%.:]+)$") or ""
-end
-
-local function contains(haystack, needle)
-    return string.find(pleasureLib:lower(haystack), pleasureLib:lower(needle), 1, true) ~= nil
-end
-
-local function object_named_like(object, needle)
-    local text = object_class_token(object) .. " " .. object_short_name(object)
-    return contains(text, needle)
-end
-
-local function object_is_inventory_main(object)
-    for _, needle in ipairs(INVENTORY_MAIN_PATH_NEEDLES) do
-        if object_named_like(object, needle) then return true end
-    end
-    return false
-end
-
-local function property_value(object, property_name)
-    if not is_valid(object) then return nil end
-    local value = pleasureLib:try(function()
-        if type(object.GetPropertyValue) == "function" then
-            return object:GetPropertyValue(property_name)
-        end
-        return nil
-    end)
-    if value ~= nil then return pleasureLib:unwrap(value) end
-
-    value = pleasureLib:try(function() return object[property_name] end)
-    return pleasureLib:unwrap(value)
-end
-
-local function set_property_value(object, property_name, value)
-    if not is_valid(object) then return false, "object invalid" end
-
-    local direct_ok = pcall(function()
-        object[property_name] = value
-    end)
-    if direct_ok then return true, "direct" end
-
-    local setter_ok, setter_result = pcall(function()
-        if type(object.SetPropertyValue) == "function" then
-            return object:SetPropertyValue(property_name, value)
-        end
-        return nil
-    end)
-    if setter_ok then return true, setter_result or "SetPropertyValue" end
-
-    return false, setter_result
-end
-
-local function number_property(object, property_name)
-    local value = pleasureLib:unwrap(property_value(object, property_name))
-    local number = tonumber(value)
-    if number ~= nil then return number end
-    return nil
-end
-
-local function bool_property(object, property_name)
-    local value = pleasureLib:unwrap(property_value(object, property_name))
-    if value == true or value == 1 then return true end
-    if value == false or value == 0 then return false end
-
-    local text = pleasureLib:lower(value)
-    if text == "true" or text == "1" then return true end
-    if text == "false" or text == "0" then return false end
-    return nil
-end
-
-local function widget_visibility_value(widget)
-    local value = pleasureLib:unwrap(property_value(widget, "Visibility"))
-    if value == nil then return "nil" end
-    return tostring(value)
-end
-
-local function ufunction_loaded(path)
-    return is_valid(pleasureLib:find_object(path))
-end
-
-local function related_object_with_name(start_object, needle)
-    local current = pleasureLib:unwrap(start_object)
-    local depth = 0
-    while is_valid(current) and depth < 14 do
-        if object_named_like(current, needle) then return current end
-
-        local next_object = pleasureLib:try(function()
-            if type(current.GetOuter) == "function" then return current:GetOuter() end
-            return nil
-        end)
-        if not is_valid(next_object) and type(current.GetParent) == "function" then
-            next_object = pleasureLib:try(function() return current:GetParent() end)
-        end
-        current = pleasureLib:unwrap(next_object)
-        depth = depth + 1
-    end
-    return nil
-end
-
-local function tooltip_is_valid(info)
-    if info == nil then return false end
-    local valid = pleasureLib:unwrap(property_value(info, "IsValid"))
-    if valid == true or valid == 1 then return true end
-    if valid == false or valid == 0 then return false end
-    return true
-end
-
-local function call_delegate(delegate, ...)
-    delegate = pleasureLib:unwrap(delegate)
-    if delegate == nil then return false, "delegate missing" end
-
-    local method_names = { "Broadcast", "Execute", "Call" }
-    local args = { ... }
-    args.n = select("#", ...)
-    local unpack_args = table.unpack or unpack
-    if not unpack_args then return false, "unpack unavailable" end
-
-    for _, name in ipairs(method_names) do
-        local method = pleasureLib:try(function() return delegate[name] end)
-        if type(method) == "function" then
-            local ok, result = pcall(function()
-                return method(delegate, unpack_args(args, 1, args.n))
-            end)
-            if ok then return true, name end
-            return false, result
-        end
-    end
-
-    if type(delegate) == "function" then
-        local ok, result = pcall(function()
-            return delegate(unpack_args(args, 1, args.n))
-        end)
-        if ok then return true, "call" end
-        return false, result
-    end
-
-    return false, "delegate method missing"
-end
-
-local function run_later(ms, fn)
-    if type(fn) ~= "function" then return false end
-    -- Schedule directly on the game thread so rapid hover events cannot
-    -- build a second queue of callbacks waiting to be marshalled later.
-    return pleasureLib:delay_game_thread(ms, function()
-        if generation_is_current() then fn() end
-    end)
-end
-
-local function comparison_clock_ms(world_context)
-    if not is_valid(gameplay_statics_default) then
-        gameplay_statics_default =
-            pleasureLib:find_object(GAMEPLAY_STATICS_DEFAULT_OBJECT)
-    end
-
-    local real_time_seconds = pleasureLib:try(function()
-        if is_valid(gameplay_statics_default)
-            and type(gameplay_statics_default.GetRealTimeSeconds)
-                == "function"
-        then
-            return gameplay_statics_default:GetRealTimeSeconds(
-                world_context)
-        end
-        return nil
-    end)
-    real_time_seconds =
-        tonumber(pleasureLib:unwrap(real_time_seconds))
-    if real_time_seconds ~= nil then
-        if comparison_clock_source_logged ~= "GameplayStatics" then
-            comparison_clock_source_logged = "GameplayStatics"
-            pleasureLib:debug_log(
-                "weapon comparison clock source=GameplayStatics")
-        end
-        return math.floor(real_time_seconds * 1000)
-    end
-
-    local world = pleasureLib:try(function()
-        if is_valid(world_context)
-            and type(world_context.GetWorld) == "function"
-        then
-            return world_context:GetWorld()
-        end
-        return nil
-    end)
-    world = pleasureLib:unwrap(world)
-    real_time_seconds =
-        tonumber(property_value(world, "RealTimeSeconds"))
-    if real_time_seconds ~= nil then
-        if comparison_clock_source_logged ~= "UWorld" then
-            comparison_clock_source_logged = "UWorld"
-            pleasureLib:debug_log(
-                "weapon comparison clock source=UWorld")
-        end
-        return math.floor(real_time_seconds * 1000)
-    end
-
-    -- Never mix this world-relative clock with a different time origin while
-    -- the inventory is being torn down. Callers safely fall back to a full
-    -- settle window when no comparable timestamp is available.
-    return nil
-end
 
 local function inventory_wearable_tooltip_widget(inventory_main)
     if not is_valid(inventory_main) then return nil end
@@ -887,24 +664,6 @@ local function slot_has_hotbar_assignment(slot)
     -- items assigned to the hotbar. Those items are already the equipped
     -- comparison source and must not start a comparison with themselves.
     return bool_property(slot, "ShowingHotkey") == true
-end
-
-local function array_length(value)
-    value = pleasureLib:unwrap(value)
-    if value == nil then return nil end
-
-    local ok, length = pcall(function() return #value end)
-    if ok and type(length) == "number" then return length end
-
-    for _, method_name in ipairs({ "Num", "GetArrayNum" }) do
-        local method = pleasureLib:try(function() return value[method_name] end)
-        if type(method) == "function" then
-            length = pleasureLib:try(function() return pleasureLib:unwrap(method(value)) end)
-            length = tonumber(length)
-            if length ~= nil then return length end
-        end
-    end
-    return nil
 end
 
 local function first_hotbar_weapon_position(hotbar, inventory_type)

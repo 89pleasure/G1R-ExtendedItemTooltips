@@ -80,6 +80,16 @@ then
     return
 end
 
+local Discovery = load_local_module(
+    "extended_item_tooltips_discovery.lua",
+    "extended_item_tooltips_discovery")
+if type(Discovery) ~= "table"
+    or type(Discovery.new) ~= "function"
+then
+    pleasureLib:log("Discovery module factory unavailable")
+    return
+end
+
 local Hooks = load_local_module(
     "extended_item_tooltips_hooks.lua",
     "extended_item_tooltips_hooks")
@@ -140,6 +150,16 @@ if not inventory_ok or type(inventoryHelpers) ~= "table" then
     return
 end
 
+local discovery_ok, discovery = pcall(Discovery.new, {
+    pleasure_lib = pleasureLib,
+    runtime = runtime,
+})
+if not discovery_ok or type(discovery) ~= "table" then
+    pleasureLib:log("Could not initialize discovery module: "
+        .. tostring(discovery))
+    return
+end
+
 local config = configController.values
 local weapon_comparison_hover_settle_ms =
     configController.clamp_weapon_comparison_delay_ms
@@ -158,7 +178,6 @@ local is_valid = runtime.is_valid
 local full_name = runtime.full_name
 local object_instance_key = runtime.object_instance_key
 local object_world_key = runtime.object_world_key
-local object_is_inventory_main = runtime.object_is_inventory_main
 local property_value = runtime.property_value
 local set_property_value = runtime.set_property_value
 local bool_property = runtime.bool_property
@@ -191,8 +210,6 @@ local set_widget_visibility =
     widgetHelpers.set_widget_visibility
 local force_weapon_comparison_hint =
     widgetHelpers.force_weapon_comparison_hint
-local cached_inventory_main = nil
-local cached_wearables_bar = nil
 local cached_hotbar = nil
 local hotbar_creation_requested_for_controller = {}
 local inventory_session_token = 0
@@ -237,33 +254,8 @@ local active_weapon_comparison = {
     source_weapon_type = nil,
     source_definition_name = nil,
 }
-local refresh_inventory_main_from_slot = nil
 local reset_inventory_runtime_state = nil
 local on_slot_hovered = nil
-
-local function wearables_bar_from(slot_or_inventory)
-    local direct = pleasureLib:unwrap(property_value(slot_or_inventory, "EquippedWearables"))
-    if is_valid(direct) then
-        cached_wearables_bar = direct
-        return direct
-    end
-
-    local related = related_object_with_name(slot_or_inventory, "W_EquippedWearables")
-    if is_valid(related) then
-        cached_wearables_bar = related
-        return related
-    end
-
-    local inventory_main = refresh_inventory_main_from_slot(slot_or_inventory)
-    direct = pleasureLib:unwrap(property_value(inventory_main, "EquippedWearables"))
-    if is_valid(direct) then
-        cached_wearables_bar = direct
-        return direct
-    end
-
-    if is_valid(cached_wearables_bar) then return cached_wearables_bar end
-    return nil
-end
 
 local function on_inventory_shown(_hook_name, context)
     local inventory_main = pleasureLib:unwrap(context)
@@ -273,8 +265,7 @@ local function on_inventory_shown(_hook_name, context)
         reset_inventory_runtime_state("inventory.shown")
     end
     hotbar_creation_requested_for_controller = {}
-    cached_inventory_main = inventory_main
-    cached_wearables_bar = nil
+    discovery.begin_inventory_session(inventory_main)
     cached_hotbar = nil
     set_wearable_compare_flag(inventory_main,
         config.EnableComparisonTooltips == true
@@ -409,34 +400,6 @@ local function hide_equipped_tooltip_widgets(wearables_bar, inventory_main, labe
             tostring(label) .. "." .. tostring(entry.label)) or hidden
     end
     return hidden
-end
-
-refresh_inventory_main_from_slot = function(slot)
-    local related = related_object_with_name(slot, "W_Inventory_Main")
-    if is_valid(related) then
-        cached_inventory_main = related
-        return related
-    end
-
-    local parent = pleasureLib:try(function()
-        if type(slot.GetParent) == "function" then return slot:GetParent() end
-        return nil
-    end)
-    local depth = 0
-    while is_valid(parent) and depth < 10 do
-        if object_is_inventory_main(parent) then
-            cached_inventory_main = parent
-            return parent
-        end
-        local current = parent
-        parent = pleasureLib:try(function()
-            if type(current.GetParent) == "function" then return current:GetParent() end
-            return nil
-        end)
-        depth = depth + 1
-    end
-
-    return cached_inventory_main
 end
 
 local function equipped_rehover_allowed(slot)
@@ -997,8 +960,7 @@ reset_inventory_runtime_state = function(label)
     clear_inventory_comparison_state()
     active_equipped_hover.token = active_equipped_hover.token + 1
     last_hover_at = {}
-    cached_inventory_main = nil
-    cached_wearables_bar = nil
+    discovery.reset()
     cached_hotbar = nil
 end
 
@@ -1389,8 +1351,9 @@ on_slot_hovered = function(_hook_name, context)
         return nil
     end
 
-    local inventory_main = refresh_inventory_main_from_slot(slot)
-    local wearables_bar = wearables_bar_from(slot)
+    local inventory_main =
+        discovery.refresh_inventory_main_from_slot(slot)
+    local wearables_bar = discovery.wearables_bar_from(slot)
 
     enable_wearables_tooltips(wearables_bar)
     ensure_wearable_tooltip_links(wearables_bar, inventory_main, "hover.before")
@@ -1458,8 +1421,9 @@ local function on_slot_unhovered(_hook_name, context)
         return nil
     end
 
-    local inventory_main = refresh_inventory_main_from_slot(slot)
-    local wearables_bar = wearables_bar_from(slot)
+    local inventory_main =
+        discovery.refresh_inventory_main_from_slot(slot)
+    local wearables_bar = discovery.wearables_bar_from(slot)
     local token = active_equipped_hover.token
     run_later(10, function()
         if active_equipped_hover.active == true

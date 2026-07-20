@@ -60,7 +60,12 @@ On this machine, `git` may not be on `PATH`. Use the GitHub Desktop bundled bina
 & "C:\Users\lenna\AppData\Local\GitHubDesktop\app-3.6.2\resources\app\git\cmd\git.exe" status --short
 ```
 
-If a Lua interpreter is available, run a syntax check with `luac -p package/ExtendedItemTooltips/Scripts/main.lua`.
+If a Lua interpreter is available, syntax-check every packaged script:
+
+```powershell
+Get-ChildItem package/ExtendedItemTooltips/Scripts -Filter *.lua |
+  ForEach-Object { luac -p $_.FullName }
+```
 
 ## Coding Style & Naming Conventions
 
@@ -85,4 +90,7 @@ Pull requests should include a concise summary, changed files, in-game test note
 
 ## Configuration Notes
 
-`ExtendedItemTooltips.ini` supports `Enabled`, `Debug`, `TooltipCooldownMs`, `ForceTooltipVisibility`, `EnableComparisonTooltips`, and optional semicolon-separated override lists for inventory slot hover/unhover hook candidates.
+`ExtendedItemTooltips.ini` supports `Enabled`, `Debug`, `TooltipCooldownMs`,
+`ForceTooltipVisibility`, `EnableComparisonTooltips`,
+`ComparisonDefaultEnabled`, and optional semicolon-separated override lists for
+inventory slot hover/unhover hook candidates.

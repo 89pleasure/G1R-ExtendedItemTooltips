@@ -4,8 +4,8 @@
 
 This repository contains a UE4SS Lua mod for Gothic 1 Remake.
 
-- `package/ExtendedItemTooltips/Scripts/main.lua` contains runtime orchestration,
-  hooks, tooltip controllers, and UE4SS integration.
+- `package/ExtendedItemTooltips/Scripts/main.lua` contains module wiring,
+  cross-controller routing, hook dispatch, and UE4SS integration.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_config.lua`
   owns defaults, INI loading, localization, and game-settings registration.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_runtime.lua`
@@ -19,6 +19,10 @@ This repository contains a UE4SS Lua mod for Gothic 1 Remake.
   owns hook registration, late-UI notifications, and retry state.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_hotbar.lua`
   resolves the weapon hotbar and owns its cache and creation-attempt state.
+- `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_equipped_hover.lua`
+  owns equipped-slot hover state, dispatcher calls, and visibility retries.
+- `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_inventory_comparison.lua`
+  owns inventory comparison snapshots, settling, retries, and hook handling.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_widgets.lua`
   owns tooltip widget discovery, reference linking, and visibility operations.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_weapon_state.lua`

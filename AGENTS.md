@@ -21,6 +21,8 @@ This repository contains a UE4SS Lua mod for Gothic 1 Remake.
   resolves the weapon hotbar and owns its cache and creation-attempt state.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_widgets.lua`
   owns tooltip widget discovery, reference linking, and visibility operations.
+- `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_weapon_state.lua`
+  owns the active weapon-comparison identity and widget visibility lifecycle.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_weapon_bridge.lua`
   owns the scoped native hotbar comparison transaction and restoration.
 - `package/ExtendedItemTooltips/ExtendedItemTooltips.ini` is the user-facing configuration file.

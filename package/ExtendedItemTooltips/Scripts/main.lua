@@ -114,6 +114,16 @@ if type(Widgets) ~= "table" or type(Widgets.new) ~= "function" then
     return
 end
 
+local WeaponState = load_local_module(
+    "extended_item_tooltips_weapon_state.lua",
+    "extended_item_tooltips_weapon_state")
+if type(WeaponState) ~= "table"
+    or type(WeaponState.new) ~= "function"
+then
+    pleasureLib:log("Weapon state module factory unavailable")
+    return
+end
+
 local WeaponBridge = load_local_module(
     "extended_item_tooltips_weapon_bridge.lua",
     "extended_item_tooltips_weapon_bridge")
@@ -202,6 +212,28 @@ if not widgets_ok or type(widgetHelpers) ~= "table" then
     return
 end
 
+local weapon_state_ok, weaponState = pcall(WeaponState.new, {
+    runtime = runtime,
+    set_widget_visibility =
+        widgetHelpers.set_widget_visibility,
+    visibility_collapsed =
+        widgetHelpers.visibility_collapsed,
+    visibility_self_hit_test_invisible =
+        widgetHelpers.visibility_self_hit_test_invisible,
+})
+if not weapon_state_ok
+    or type(weaponState) ~= "table"
+    or type(weaponState.is_active) ~= "function"
+    or type(weaponState.source_matches) ~= "function"
+    or type(weaponState.activate) ~= "function"
+    or type(weaponState.maintain_visibility) ~= "function"
+    or type(weaponState.end_comparison) ~= "function"
+then
+    pleasureLib:log("Could not initialize weapon state module: "
+        .. tostring(weaponState))
+    return
+end
+
 local bridge_ok, weaponBridge = pcall(WeaponBridge.new, {
     pleasure_lib = pleasureLib,
     runtime = runtime,
@@ -282,15 +314,6 @@ local active_inventory_comparison = {
     resolution_attempt = 0,
     comparison_attempt = 0,
     settle_not_before_ms = nil,
-}
-local active_weapon_comparison = {
-    active = false,
-    compare_widget = nil,
-    source_inventory_main_key = nil,
-    source_slot_key = nil,
-    source_item_pos = nil,
-    source_weapon_type = nil,
-    source_definition_name = nil,
 }
 local reset_inventory_runtime_state = nil
 local on_slot_hovered = nil
@@ -523,47 +546,6 @@ local function stop_active_equipped_hover(label)
     return true
 end
 
-local function clear_weapon_comparison_state()
-    active_weapon_comparison.active = false
-    active_weapon_comparison.compare_widget = nil
-    active_weapon_comparison.source_inventory_main_key = nil
-    active_weapon_comparison.source_slot_key = nil
-    active_weapon_comparison.source_item_pos = nil
-    active_weapon_comparison.source_weapon_type = nil
-    active_weapon_comparison.source_definition_name = nil
-end
-
-local function end_weapon_comparison(label)
-    if active_weapon_comparison.active ~= true then return false end
-
-    local compare_widget = active_weapon_comparison.compare_widget
-    clear_weapon_comparison_state()
-    -- The hotbar bridge is restored before a comparison becomes active.
-    -- Cleanup therefore only touches the long-lived InventoryMain widget.
-    set_widget_visibility(compare_widget, WIDGET_VISIBILITY_COLLAPSED,
-        tostring(label) .. ".weaponCompare", true)
-    return true
-end
-
-local function maintain_weapon_comparison_visibility(compare_widget, label)
-    set_widget_visibility(compare_widget,
-        WIDGET_VISIBILITY_SELF_HIT_TEST_INVISIBLE,
-        tostring(label) .. ".immediate")
-end
-
-local function weapon_comparison_source_matches(
-    inventory_main_key, slot_key, item_pos, weapon_type, definition_name)
-    if active_weapon_comparison.active ~= true then return false end
-    if not is_valid(active_weapon_comparison.compare_widget) then return false end
-    return active_weapon_comparison.source_inventory_main_key
-            == inventory_main_key
-        and active_weapon_comparison.source_slot_key == slot_key
-        and active_weapon_comparison.source_item_pos == item_pos
-        and active_weapon_comparison.source_weapon_type == weapon_type
-        and active_weapon_comparison.source_definition_name
-            == definition_name
-end
-
 local function begin_weapon_comparison(
     inventory_main, weapon_type, definition_name, source_slot_key,
     source_item_pos, comparison_token, attempt)
@@ -579,11 +561,10 @@ local function begin_weapon_comparison(
 
     local source_inventory_main_key =
         active_inventory_comparison.inventory_main_key
-    if weapon_comparison_source_matches(source_inventory_main_key,
+    if weaponState.source_matches(source_inventory_main_key,
         source_slot_key, source_item_pos, weapon_type, definition_name)
     then
-        maintain_weapon_comparison_visibility(
-            active_weapon_comparison.compare_widget,
+        weaponState.maintain_visibility(
             "weaponComparison.unchanged")
         -- A regular inventory refresh evaluates the weapon's native specs
         -- and collapses this already-configured wearable-comparison input.
@@ -645,8 +626,8 @@ local function begin_weapon_comparison(
         return false, false, "comparison request changed during readiness"
     end
 
-    if active_weapon_comparison.active == true then
-        end_weapon_comparison("weaponComparison.replace")
+    if weaponState.is_active() then
+        weaponState.end_comparison("weaponComparison.replace")
     end
 
     local route_ok, route_error = weaponBridge.run(
@@ -674,16 +655,9 @@ local function begin_weapon_comparison(
         return false, false, "comparison request changed during bridge"
     end
 
-    active_weapon_comparison.active = true
-    active_weapon_comparison.compare_widget = compare_widget
-    active_weapon_comparison.source_inventory_main_key =
-        source_inventory_main_key
-    active_weapon_comparison.source_slot_key = source_slot_key
-    active_weapon_comparison.source_item_pos = source_item_pos
-    active_weapon_comparison.source_weapon_type = weapon_type
-    active_weapon_comparison.source_definition_name = definition_name
-
-    maintain_weapon_comparison_visibility(compare_widget,
+    weaponState.activate(compare_widget, source_inventory_main_key,
+        source_slot_key, source_item_pos, weapon_type, definition_name)
+    weaponState.maintain_visibility(
         "weaponComparison")
     -- UpdateToolTipOnSlot refreshes the base tooltip synchronously and hides
     -- this input for weapons because they have no wearable ItemSpec. Reassert
@@ -725,7 +699,7 @@ local function end_inventory_comparison(label)
     if active_inventory_comparison.active ~= true then return false end
 
     active_inventory_comparison.token = active_inventory_comparison.token + 1
-    end_weapon_comparison(tostring(label) .. ".weapon")
+    weaponState.end_comparison(tostring(label) .. ".weapon")
     clear_inventory_comparison_state()
     return true
 end
@@ -738,8 +712,8 @@ reset_inventory_runtime_state = function(label)
     end
     if active_inventory_comparison.active == true then
         end_inventory_comparison(tostring(label) .. ".inventory")
-    elseif active_weapon_comparison.active == true then
-        end_weapon_comparison(tostring(label) .. ".weapon")
+    elseif weaponState.is_active() then
+        weaponState.end_comparison(tostring(label) .. ".weapon")
     end
 
     active_inventory_comparison.token =
@@ -833,7 +807,7 @@ local function settle_active_inventory_comparison()
     if bool_property(inventory_main,
         "ShouldShowWearableCompare") ~= true
     then
-        end_weapon_comparison("comparison.disabled")
+        weaponState.end_comparison("comparison.disabled")
         return true
     end
 
@@ -1050,11 +1024,11 @@ local function begin_inventory_comparison(slot)
         return schedule_weapon_comparison_hover_settle()
     end
 
-    if active_weapon_comparison.active == true
-        and not weapon_comparison_source_matches(inventory_main_key,
+    if weaponState.is_active()
+        and not weaponState.source_matches(inventory_main_key,
             slot_key, item_pos, weapon_type, definition_name)
     then
-        end_weapon_comparison("weaponComparison.targetChanged")
+        weaponState.end_comparison("weaponComparison.targetChanged")
     end
 
     active_inventory_comparison.active = true
@@ -1106,7 +1080,7 @@ local function on_comparison_toggled(_hook_name, context)
         -- elapsed, the native comparison starts on the next game-thread tick.
         schedule_weapon_comparison_settle(0)
     else
-        end_weapon_comparison("comparison.toggleOff")
+        weaponState.end_comparison("comparison.toggleOff")
     end
     pleasureLib:debug_log("weapon comparison toggle handled"
         .. " enabled=" .. tostring(enabled)

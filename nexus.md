@@ -75,8 +75,7 @@ The installed folder should include:
 ExtendedItemTooltips/enabled.txt
 ExtendedItemTooltips/ExtendedItemTooltips.ini
 ExtendedItemTooltips/readme.txt
-ExtendedItemTooltips/Scripts/main.lua
-ExtendedItemTooltips/Scripts/pleasure_lib_loader.lua
+ExtendedItemTooltips/Scripts/*.lua
 ```
 
 ## Optional INI Configuration

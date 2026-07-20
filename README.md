@@ -73,4 +73,13 @@ register the same inventory hooks.
 
 The mod is deliberately defensive. Gothic 1 Remake UI internals can vary between builds, so reflected object access and UI calls are wrapped in `pcall`.
 
-The implementation is based on the UE4SS object dump from the game directory. It links the `EquippedWearables` bar to the inventory's wearable tooltip widget, broadcasts wearable slot hover events, reads the game's current `ToolTipInfoSlot`, and keeps the wearable tooltip visible while the equipped slot hover is active. For backpack equipment, it invokes the game's native `DoToggleWearableComparisonTooltip` function with a boolean only; no tooltip data structures are marshalled through Lua. If a game update changes the slot function names, add semicolon-separated overrides in the INI.
+The implementation is based on the UE4SS object dump from the game directory.
+It links the `EquippedWearables` bar to the inventory's wearable tooltip
+widget, broadcasts wearable slot hover events, reads the game's current
+`ToolTipInfoSlot`, and keeps the wearable tooltip visible while the equipped
+slot hover is active. For backpack weapons, it resolves the matching vanilla
+hotbar weapon and temporarily lends the inventory tooltip widgets to the
+hotbar's native `UpdateToolTipOnSlot` path. All borrowed references are restored
+before the bridge returns, and shared item definitions are never modified. If a
+game update changes the slot function names, add semicolon-separated overrides
+in the INI.

@@ -17,6 +17,8 @@ This repository contains a UE4SS Lua mod for Gothic 1 Remake.
   resolves and caches the active inventory and equipped-wearables widgets.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_hooks.lua`
   owns hook registration, late-UI notifications, and retry state.
+- `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_hotbar.lua`
+  resolves the weapon hotbar and owns its cache and creation-attempt state.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_widgets.lua`
   owns tooltip widget discovery, reference linking, and visibility operations.
 - `package/ExtendedItemTooltips/Scripts/extended_item_tooltips_weapon_bridge.lua`

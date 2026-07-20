@@ -90,6 +90,14 @@ then
     return
 end
 
+local Hotbar = load_local_module(
+    "extended_item_tooltips_hotbar.lua",
+    "extended_item_tooltips_hotbar")
+if type(Hotbar) ~= "table" or type(Hotbar.new) ~= "function" then
+    pleasureLib:log("Hotbar module factory unavailable")
+    return
+end
+
 local Hooks = load_local_module(
     "extended_item_tooltips_hooks.lua",
     "extended_item_tooltips_hooks")
@@ -126,13 +134,6 @@ local EQUIPPED_TOOLTIP_FORCE_DELAYS_MS = {
 local WEAPON_COMPARISON_RETRY_DELAYS_MS = {
     50, 100, 200, 350, 500, 750, 1000, 1500,
 }
-local HOTBAR_CREATION_MAX_ATTEMPTS = 3
-local HOTBAR_CREATION_RETRY_ATTEMPTS = {
-    [0] = true,
-    [3] = true,
-    [6] = true,
-    [7] = true,
-}
 
 local INVENTORY_MAIN_PATH_NEEDLES = {
     "W_Inventory_Main",
@@ -157,6 +158,23 @@ local inventory_ok, inventoryHelpers = pcall(Inventory.new, {
 if not inventory_ok or type(inventoryHelpers) ~= "table" then
     pleasureLib:log("Could not initialize inventory module: "
         .. tostring(inventoryHelpers))
+    return
+end
+
+local hotbar_ok, hotbarResolver = pcall(Hotbar.new, {
+    pleasure_lib = pleasureLib,
+    runtime = runtime,
+    first_hotbar_weapon_position =
+        inventoryHelpers.first_hotbar_weapon_position,
+})
+if not hotbar_ok
+    or type(hotbarResolver) ~= "table"
+    or type(hotbarResolver.find_weapon_hotbar) ~= "function"
+    or type(hotbarResolver.invalidate_cache) ~= "function"
+    or type(hotbarResolver.begin_inventory_session) ~= "function"
+then
+    pleasureLib:log("Could not initialize hotbar module: "
+        .. tostring(hotbarResolver))
     return
 end
 
@@ -203,7 +221,6 @@ end
 local is_valid = runtime.is_valid
 local full_name = runtime.full_name
 local object_instance_key = runtime.object_instance_key
-local object_world_key = runtime.object_world_key
 local property_value = runtime.property_value
 local bool_property = runtime.bool_property
 local related_object_with_name = runtime.related_object_with_name
@@ -234,8 +251,6 @@ local set_widget_visibility =
     widgetHelpers.set_widget_visibility
 local force_weapon_comparison_hint =
     widgetHelpers.force_weapon_comparison_hint
-local cached_hotbar = nil
-local hotbar_creation_requested_for_controller = {}
 local inventory_session_token = 0
 local weapon_comparison_settle_pending = false
 local weapon_comparison_settle_timer_generation = 0
@@ -287,9 +302,8 @@ local function on_inventory_shown(_hook_name, context)
     if type(reset_inventory_runtime_state) == "function" then
         reset_inventory_runtime_state("inventory.shown")
     end
-    hotbar_creation_requested_for_controller = {}
+    hotbarResolver.begin_inventory_session()
     discovery.begin_inventory_session(inventory_main)
-    cached_hotbar = nil
     set_wearable_compare_flag(inventory_main,
         config.EnableComparisonTooltips == true
             and config.ComparisonDefaultEnabled == true,
@@ -509,130 +523,6 @@ local function stop_active_equipped_hover(label)
     return true
 end
 
-local function find_weapon_hotbar(
-    inventory_main, inventory_type, comparison_attempt)
-    comparison_attempt = tonumber(comparison_attempt) or 0
-    local expected_world = object_world_key(inventory_main)
-    local fallback = nil
-    local seen = {}
-
-    local function hotbar_is_shaped(candidate)
-        candidate = pleasureLib:unwrap(candidate)
-        return is_valid(candidate)
-            and is_valid(property_value(candidate, "m_InventoryBase"))
-            and (is_valid(property_value(candidate, "Slot_Melee"))
-                or is_valid(property_value(candidate, "Slot_Ranged")))
-    end
-
-    local function inspect_hotbar(candidate, source)
-        candidate = pleasureLib:unwrap(candidate)
-        if not hotbar_is_shaped(candidate) then return nil end
-
-        local candidate_world = object_world_key(candidate)
-        if expected_world ~= "" and candidate_world ~= ""
-            and candidate_world ~= expected_world
-        then
-            pleasureLib:debug_log("ignored hotbar from another world"
-                .. " source=" .. tostring(source)
-                .. " world=" .. tostring(candidate_world)
-                .. " expected=" .. tostring(expected_world))
-            return nil
-        end
-
-        local candidate_key = object_instance_key(candidate)
-        if seen[candidate_key] == true then return nil end
-        seen[candidate_key] = true
-
-        local position, definition, ready =
-            inventoryHelpers.first_hotbar_weapon_position(
-                candidate,
-                inventory_type)
-        if position ~= nil and is_valid(definition) then
-            cached_hotbar = candidate
-            pleasureLib:debug_log("resolved matching weapon hotbar"
-                .. " source=" .. tostring(source)
-                .. " object=" .. full_name(candidate)
-                .. " position=" .. tostring(position))
-            return candidate
-        end
-
-        if fallback == nil then fallback = candidate end
-        pleasureLib:debug_log("inspected weapon hotbar candidate"
-            .. " source=" .. tostring(source)
-            .. " ready=" .. tostring(ready)
-            .. " object=" .. full_name(candidate))
-        return nil
-    end
-
-    if is_valid(cached_hotbar) then
-        local matched = inspect_hotbar(cached_hotbar, "cache")
-        if matched ~= nil then return matched end
-    end
-    cached_hotbar = nil
-
-    local controllers = pleasureLib:find_all_of("HUDQuickSlotController")
-    if type(controllers) == "table" then
-        for _, object in ipairs(controllers) do
-            local controller = pleasureLib:unwrap(object)
-            local hotbar = inspect_hotbar(
-                property_value(controller, "m_QuickSlot"), "controller")
-            if hotbar ~= nil then return hotbar end
-        end
-    end
-
-    local objects = pleasureLib:find_all_of("W_Hotbar_C")
-    if type(objects) == "table" then
-        for _, object in ipairs(objects) do
-            local hotbar = inspect_hotbar(object, "objectScan")
-            if hotbar ~= nil then return hotbar end
-        end
-    end
-
-    -- Vanilla clears the hidden keyboard hotbar. Drive the same instant
-    -- press/release path a bounded number of times so it creates a normal
-    -- instance without latching it visible like AlwaysVisibleHotbar does.
-    if type(controllers) == "table" then
-        for _, object in ipairs(controllers) do
-            local controller = pleasureLib:unwrap(object)
-            local controller_world = object_world_key(controller)
-            local same_world = expected_world == ""
-                or controller_world == ""
-                or controller_world == expected_world
-            local controller_key = object_instance_key(controller)
-            local creation_attempts = tonumber(
-                hotbar_creation_requested_for_controller[controller_key])
-                or 0
-            local current_hotbar =
-                property_value(controller, "m_QuickSlot")
-            if is_valid(controller) and same_world
-                and not hotbar_is_shaped(current_hotbar)
-                and creation_attempts < HOTBAR_CREATION_MAX_ATTEMPTS
-                and HOTBAR_CREATION_RETRY_ATTEMPTS[comparison_attempt]
-                    == true
-            then
-                hotbar_creation_requested_for_controller[controller_key] =
-                    creation_attempts + 1
-                local pressed, press_error = pcall(function()
-                    controller:QuickSlotBindingPress()
-                    controller:QuickSlotBindingRelease()
-                end)
-                pleasureLib:debug_log("requested vanilla hotbar creation"
-                    .. " ok=" .. tostring(pressed)
-                    .. " error=" .. tostring(press_error))
-                local hotbar = inspect_hotbar(
-                    property_value(controller, "m_QuickSlot"),
-                    "controllerAfterTap")
-                if hotbar ~= nil then return hotbar end
-            end
-        end
-    end
-
-    if fallback ~= nil then
-        cached_hotbar = fallback
-    end
-    return fallback
-end
-
 local function clear_weapon_comparison_state()
     active_weapon_comparison.active = false
     active_weapon_comparison.compare_widget = nil
@@ -707,7 +597,7 @@ local function begin_weapon_comparison(
         return false, false, "comparison bridge busy"
     end
 
-    local hotbar = find_weapon_hotbar(
+    local hotbar = hotbarResolver.find_weapon_hotbar(
         inventory_main, weapon_type, attempt)
     if not is_valid(hotbar) then
         return false, true, "vanilla hotbar unavailable"
@@ -858,7 +748,7 @@ reset_inventory_runtime_state = function(label)
     active_equipped_hover.token = active_equipped_hover.token + 1
     last_hover_at = {}
     discovery.reset()
-    cached_hotbar = nil
+    hotbarResolver.invalidate_cache()
 end
 
 local function inventory_comparison_matches(slot, item_pos)
